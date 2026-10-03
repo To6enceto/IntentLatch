@@ -72,10 +72,20 @@ curl -s localhost:8080/authority -H 'content-type: application/json' -d "{\"toke
 # -> {"valid": false, "reason": "token_revoked"}   (or "token_invalid"); nothing else is revealed
 ```
 
-Models are `corporate-a` and `corporate-b`. The `AUTH-MODEL` policy is stored
-but not enforced until the policy pipeline lands, so any valid token can call
-both. Reissue a token with `POST /admin/employees/<employee-id>/token`; revoke
-an employee with `POST /admin/employees/<employee-id>/revoke`.
+Models are `corporate-a` and `corporate-b`. A team can only call the models it
+is authorized for: the `AUTH-MODEL` policy answers any other model with 403
+`policy_blocked`, naming the policy and its reason, and nothing is forwarded.
+Disabling `AUTH-MODEL` lets every valid token call both models from the next
+request. Reissue a token with `POST /admin/employees/<employee-id>/token`;
+revoke an employee with `POST /admin/employees/<employee-id>/revoke`.
+
+```bash
+curl -s localhost:8080/v1/chat/completions -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"model": "corporate-b", "messages": [{"role": "user", "content": "Hello"}]}'
+# -> 403 {"error": {"code": "policy_blocked", "message": "Blocked by AUTH-MODEL: Team payments is not authorized for corporate-b.",
+#          "policies": [{"code": "AUTH-MODEL", "kind": "authority", "reasoning": "..."}], "policy_version": 1}}
+```
 
 ## Manage policies
 
@@ -103,3 +113,16 @@ curl -s -X PATCH localhost:8080/admin/policies/RGX-EXAMPLE -H "$ADMIN" \
 
 Limit policies take `{"max_tokens": int, "window_seconds": int, "team": "<team name>" | null}`;
 authority and limit policies always `block` and apply to prompts only.
+
+## Check a prompt
+
+`POST /check` runs a prompt through the policy pipeline as the token's employee
+and returns every policy's decision without forwarding anything to a model. It
+answers 200 even when the outcome is `blocked`.
+
+```bash
+curl -s localhost:8080/check -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"model": "corporate-b", "prompt": "Hello"}'
+# -> {"outcome": "blocked", "policy_version": 1, "policy_results": [{"code": "AUTH-MODEL", "kind": "authority",
+#      "ai": false, "action": "block", "result": "violated", "reasoning": "...", "latency_ms": 0.002}], "rewritten": null}
+```

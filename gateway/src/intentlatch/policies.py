@@ -32,6 +32,7 @@ SEEDS_FILE = Path(__file__).parent / "policy_seeds.json"
 
 SHAPE_FIELDS = ("code", "ai", "text", "kind", "params", "action", "applies_to", "enabled")
 POLICY_FIELDS = (*SHAPE_FIELDS, "created_at", "updated_at")
+SNAPSHOT_FIELDS = ("code", "ai", "text", "kind", "params", "action", "applies_to")
 POLICY_COLUMNS = ", ".join(POLICY_FIELDS)
 INSERT_POLICY = (
     "INSERT INTO policies (code, ai, text, kind, params, action, applies_to, enabled)"
@@ -175,6 +176,23 @@ def merge_update(current: dict[str, Any], update: PolicyUpdate) -> PolicyCreate:
     return PolicyCreate.model_validate({**current, **changes})
 
 
+class Policy(BaseModel):
+    """An enabled policy as the pipeline sees it."""
+
+    code: str
+    ai: bool
+    text: str | None
+    kind: Kind | None
+    params: dict[str, Any]
+    action: Action
+    applies_to: AppliesTo
+
+
+class PolicySnapshot(BaseModel):
+    version: int
+    policies: list[Policy]
+
+
 def load_seeds(path: Path = SEEDS_FILE) -> list[PolicyCreate]:
     return [PolicyCreate.model_validate(entry) for entry in json.loads(path.read_text())]
 
@@ -245,6 +263,20 @@ async def list_policies(pool: AsyncConnectionPool) -> dict[str, Any]:
         rows = await cursor.fetchall()
     policies = [policy_json(row[1:]) for row in rows if row[1] is not None]
     return {"policies": policies, "version": rows[0][0]}
+
+
+async def load_snapshot(pool: AsyncConnectionPool) -> PolicySnapshot:
+    # Read on every request, so a committed change applies from the next request.
+    columns = ", ".join(f"p.{field}" for field in SNAPSHOT_FIELDS)
+    async with db.connection(pool) as conn:
+        # One statement, so the version matches the enabled policies it is read with.
+        cursor = await conn.execute(
+            f"SELECT v.version, {columns} FROM policy_version v"
+            ' LEFT JOIN policies p ON p.enabled ORDER BY p.code COLLATE "C"'
+        )
+        rows = await cursor.fetchall()
+    policies = [Policy(**dict(zip(SNAPSHOT_FIELDS, row[1:]))) for row in rows if row[1] is not None]
+    return PolicySnapshot(version=rows[0][0], policies=policies)
 
 
 async def update_policy(pool: AsyncConnectionPool, code: str, update: PolicyUpdate) -> dict[str, Any]:
