@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Node (console)
+node_modules/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+kubeconfig*
+*-kubeconfig.yaml
+
+# Test output
+/test-reports/
+junit*.xml
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# AI Blueprint local workflow files
+.agents/
+.claude/
+blueprint/
+CLAUDE.md
