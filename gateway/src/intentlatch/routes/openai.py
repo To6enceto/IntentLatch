@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .. import upstream
+from .. import pipeline, upstream
 from ..auth import require_identity
 from ..chat import ChatRequest, allowlisted
 
@@ -45,6 +45,7 @@ async def list_models(request: Request) -> dict[str, Any]:
 @router.post("/v1/chat/completions")
 async def chat_completions(body: OpenAIChatRequest, request: Request) -> Response:
     tag = request.app.state.llms.tag_for(body.model)
+    await pipeline.enforce_prompt_policies(request, body.model)
     data = body.model_dump(exclude_unset=True)
     payload = allowlisted(data, FORWARDED_FIELDS) | {"model": tag, "stream": False}
     completion = await upstream.request_json(
