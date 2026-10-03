@@ -99,7 +99,7 @@ overwrites an existing policy.
 
 ```bash
 curl -s localhost:8080/admin/policies -H "$ADMIN"
-# -> {"policies": [{"code": "AUTH-MODEL", ...}], "version": 1}
+# -> {"policies": [{"code": "AUTH-MODEL", ...}, {"code": "RGX-CARD", ...}, ...], "version": 1}
 
 curl -s localhost:8080/admin/policies -H "$ADMIN" -H 'content-type: application/json' \
   -d '{"code": "RGX-EXAMPLE", "ai": false, "kind": "regex", "params": {"pattern": "(?i)\\bPL\\d{26}\\b"},
@@ -114,6 +114,46 @@ curl -s -X PATCH localhost:8080/admin/policies/RGX-EXAMPLE -H "$ADMIN" \
 Limit policies take `{"max_tokens": int, "window_seconds": int, "team": "<team name>" | null}`;
 authority and limit policies always `block` and apply to prompts only.
 
+## Regex policies
+
+A regex policy's `pattern` uses Python `re` syntax and is case-sensitive unless it
+starts with `(?i)`. `applies_to` decides whether it runs on the prompt, on the
+model's answer, or on both:
+
+- **The prompt** is every message in a chat request, whatever its role (`system`,
+  `user`, `assistant` or `tool`), because the client controls the whole history.
+  Each message's text and its tool-call arguments are checked. `/check` treats
+  `prompt` as one user message.
+- **The answer** is the model's text and tool-call arguments. It is checked
+  before anything reaches the caller; streamed answers are buffered first.
+
+Before matching, the gateway strips zero-width and bidi characters (every Unicode
+format character) and decodes URL-encoded text and Base64 runs of 12 or more
+characters. Patterns run on the text and on each decoded form, so an encoding
+trick does not slip past them. What is forwarded never changes.
+
+A violated `block` policy answers 403 `policy_blocked` with its code, and a
+blocked answer is discarded. An `edit` match is meant for the control agent,
+which does not exist yet (build plan item 9), so until then an `edit` match
+blocks too. The reasoning never repeats the matched text.
+
+A pattern with a group named `luhn` counts a match only when the digits that
+group captured pass the Luhn checksum, which is how `RGX-CARD` skips most random
+long numbers. Patterns run without a timeout, so avoid nested unbounded repeats
+such as `(a+)+`.
+
+| Seeded policy | Finds | Action | Applies to |
+|---|---|---|---|
+| `RGX-EMAIL` | email addresses | edit | both |
+| `RGX-PHONE` | `+` international numbers, and Polish numbers written `600 700 800` | edit | both |
+| `RGX-IBAN` | IBANs, grouped in fours or not | edit | both |
+| `RGX-PESEL` | PESEL numbers (birth-date structure, no checksum) | edit | both |
+| `RGX-CARD` | Luhn-valid card numbers | edit | both |
+| `RGX-CLOUD-KEY` | AWS access key IDs and Google API keys | block | both |
+| `RGX-GIT-TOKEN` | GitHub and GitLab tokens | block | both |
+| `RGX-PRIVATE-KEY` | PEM, OpenSSH and PGP private keys | block | both |
+| `RGX-EXFIL-IMAGE` | markdown images whose URL carries a query string | block | response |
+
 ## Check a prompt
 
 `POST /check` runs a prompt through the policy pipeline as the token's employee
@@ -125,4 +165,13 @@ curl -s localhost:8080/check -H "Authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' -d '{"model": "corporate-b", "prompt": "Hello"}'
 # -> {"outcome": "blocked", "policy_version": 1, "policy_results": [{"code": "AUTH-MODEL", "kind": "authority",
 #      "ai": false, "action": "block", "result": "violated", "reasoning": "...", "latency_ms": 0.002}], "rewritten": null}
+
+curl -s localhost:8080/check -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"model": "corporate-a", "prompt": "My key is AKIA​IOSFODNN7EXAMPLE"}'
+# -> {"outcome": "blocked", "policy_version": 1, "policy_results": [{"code": "AUTH-MODEL", "result": "pass", ...},
+#      {"code": "RGX-CARD", "result": "pass", ...}, {"code": "RGX-CLOUD-KEY", "kind": "regex", "ai": false,
+#      "action": "block", "result": "violated", "reasoning": "The prompt matches this policy's pattern.", ...}, ...],
+#      "rewritten": null}
 ```
+
+An authority block stops the pipeline, so the first answer has no regex results.

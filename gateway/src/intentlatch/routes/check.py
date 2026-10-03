@@ -20,5 +20,5 @@ class CheckRequest(BaseModel):
 async def check(body: CheckRequest, request: Request) -> dict[str, Any]:
     # Runs the pipeline as the token's employee and reports; nothing is forwarded.
     request.app.state.llms.tag_for(body.model)
-    decision = await pipeline.decide_prompt(request, body.model)
+    decision = await pipeline.decide_prompt(request, body.model, [body.prompt])
     return decision.model_dump()

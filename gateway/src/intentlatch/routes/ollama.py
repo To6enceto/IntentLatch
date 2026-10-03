@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import pipeline, upstream
 from ..auth import require_identity
-from ..chat import ChatRequest, allowlisted
+from ..chat import ChatRequest, allowlisted, message_texts, prompt_texts
 
 router = APIRouter(dependencies=[Depends(require_identity)])
 
@@ -45,8 +45,10 @@ async def list_tags(request: Request) -> dict[str, Any]:
 @router.post("/api/chat")
 async def chat(body: OllamaChatRequest, request: Request) -> Response:
     tag = request.app.state.llms.tag_for(body.model)
-    await pipeline.enforce_prompt_policies(request, body.model)
     data = body.model_dump(exclude_unset=True)
+    snapshot = await pipeline.enforce_prompt_policies(
+        request, body.model, prompt_texts(data["messages"])
+    )
     payload = allowlisted(data, FORWARDED_FIELDS)
     options = data.get("options")
     if isinstance(options, dict):
@@ -55,10 +57,15 @@ async def chat(body: OllamaChatRequest, request: Request) -> Response:
             payload["options"] = kept
     payload |= {"model": tag, "stream": False}
     reply = await upstream.request_json(request.app.state.ollama, "POST", "/api/chat", json=payload)
+    pipeline.enforce_response_policies(request, snapshot, reply_texts(reply))
     reply["model"] = body.model
     if not body.stream:
         return JSONResponse(reply)
     return StreamingResponse(iter(replay_as_ndjson(reply)), media_type="application/x-ndjson")
+
+
+def reply_texts(reply: dict[str, Any]) -> list[str]:
+    return message_texts(reply.get("message"))
 
 
 def replay_as_ndjson(reply: dict[str, Any]) -> list[str]:

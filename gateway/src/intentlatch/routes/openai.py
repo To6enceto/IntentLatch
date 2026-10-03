@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import pipeline, upstream
 from ..auth import require_identity
-from ..chat import ChatRequest, allowlisted
+from ..chat import ChatRequest, allowlisted, message_texts, prompt_texts
 
 router = APIRouter(dependencies=[Depends(require_identity)])
 
@@ -45,12 +45,15 @@ async def list_models(request: Request) -> dict[str, Any]:
 @router.post("/v1/chat/completions")
 async def chat_completions(body: OpenAIChatRequest, request: Request) -> Response:
     tag = request.app.state.llms.tag_for(body.model)
-    await pipeline.enforce_prompt_policies(request, body.model)
     data = body.model_dump(exclude_unset=True)
+    snapshot = await pipeline.enforce_prompt_policies(
+        request, body.model, prompt_texts(data["messages"])
+    )
     payload = allowlisted(data, FORWARDED_FIELDS) | {"model": tag, "stream": False}
     completion = await upstream.request_json(
         request.app.state.ollama, "POST", "/v1/chat/completions", json=payload
     )
+    pipeline.enforce_response_policies(request, snapshot, completion_texts(completion))
     completion["model"] = body.model
     if not body.stream:
         return JSONResponse(completion)
@@ -59,6 +62,18 @@ async def chat_completions(body: OpenAIChatRequest, request: Request) -> Respons
     return StreamingResponse(
         iter(replay_as_sse(completion, include_usage)), media_type="text/event-stream"
     )
+
+
+def completion_texts(completion: dict[str, Any]) -> list[str]:
+    choices = completion.get("choices")
+    if not isinstance(choices, list):
+        return []
+    return [
+        text
+        for choice in choices
+        if isinstance(choice, dict)
+        for text in message_texts(choice.get("message"))
+    ]
 
 
 def replay_as_sse(completion: dict[str, Any], include_usage: bool) -> list[str]:
