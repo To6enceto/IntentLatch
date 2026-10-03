@@ -5,6 +5,7 @@ from .settings import Settings
 
 MODEL_A = "corporate-a"
 MODEL_B = "corporate-b"
+MODEL_IDS = (MODEL_A, MODEL_B)
 
 
 @dataclass(frozen=True)

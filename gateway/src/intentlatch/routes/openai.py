@@ -1,13 +1,14 @@
 import json
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import upstream
+from ..auth import require_identity
 from ..chat import ChatRequest, allowlisted
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_identity)])
 
 FORWARDED_FIELDS = (
     "messages",
@@ -42,7 +43,7 @@ async def list_models(request: Request) -> dict[str, Any]:
 
 
 @router.post("/v1/chat/completions")
-async def chat_completions(body: OpenAIChatRequest, request: Request):
+async def chat_completions(body: OpenAIChatRequest, request: Request) -> Response:
     tag = request.app.state.llms.tag_for(body.model)
     data = body.model_dump(exclude_unset=True)
     payload = allowlisted(data, FORWARDED_FIELDS) | {"model": tag, "stream": False}
