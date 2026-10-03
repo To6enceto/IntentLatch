@@ -46,8 +46,10 @@ and installed dependencies before adding machinery.
 
 - Python 3.12+ for the gateway; async FastAPI on the request path; Pydantic v2
   for every request, response, policy and config shape.
-- Verify the identity token on every gateway request. Never trust a team,
-  employee or model claimed in a request body.
+- Model endpoints require an employee token (`Authorization: Bearer`); admin
+  endpoints under `/admin` require the admin API key. Authority comes from the
+  database, never from token claims or a request body.
+- Never log, echo or store an employee token, the signing key or the admin key.
 - Never log or store raw identity tokens or raw sensitive values. Mask regex
   matches before writing decision records.
 - Prometheus label values stay bounded: team, model, policy code, kind, outcome,
@@ -58,8 +60,10 @@ and installed dependencies before adding machinery.
 
 Run from the repository root unless noted.
 
-- Python environment: `python3 -m venv .venv && .venv/bin/pip install -e ./gateway`
-- Settings: `cp gateway/.env.example gateway/.env`, then adjust
+- Python environment: `python3 -m venv .venv && .venv/bin/pip install -e "./gateway[test]"`
+- Settings: `cp gateway/.env.example gateway/.env`, then fill in the two
+  required secrets (`INTENTLATCH_TOKEN_SIGNING_KEY`, `INTENTLATCH_ADMIN_API_KEY`)
+  with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
 - Local PostgreSQL (development only), first time:
   `docker run -d --name intentlatch-pg -e POSTGRES_USER=intentlatch -e POSTGRES_PASSWORD=intentlatch -e POSTGRES_DB=intentlatch -p 127.0.0.1:5432:5432 postgres:17`;
   afterwards `docker start intentlatch-pg`
@@ -67,10 +71,10 @@ Run from the repository root unless noted.
   `kubectl port-forward -n upstreams svc/ollama 11434:11434`
 - Dev server (from `gateway/`):
   `../.venv/bin/uvicorn intentlatch.main:app --reload --port 8080 --env-file .env`
-  (binds to 127.0.0.1; nothing authenticates callers until identity tokens land)
+  (binds to 127.0.0.1; `README.md` shows the admin bootstrap flow)
 - Health: `curl -s localhost:8080/healthz`
-- Tests: none configured. There is no test gate until a `test` command is
-  listed here.
+- Test: `.venv/bin/pytest gateway` (pytest; tests live in `gateway/tests/`,
+  named `test_<module>.py`). This is the test gate for logic-bearing changes.
 - Lint: none configured.
 - Policy test cases: `intentlatch test run` is planned with the test runner and
   is not available yet. This is a product feature, separate from the project's

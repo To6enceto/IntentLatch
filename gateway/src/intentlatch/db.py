@@ -1,10 +1,14 @@
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 from psycopg_pool import AsyncConnectionPool
+
+from .errors import GatewayError
 
 log = logging.getLogger("intentlatch")
 
@@ -12,6 +16,7 @@ MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 # Fixed key so every replica contends for the same advisory lock.
 MIGRATION_LOCK_KEY = 7311204118
 CONNECT_TIMEOUT_SECONDS = 10
+REQUEST_CONNECTION_TIMEOUT_SECONDS = 5
 PING_TIMEOUT_SECONDS = 2
 
 
@@ -62,13 +67,30 @@ async def migrate(conninfo: str, directory: Path) -> list[str]:
 
 
 async def open_pool(conninfo: str) -> AsyncConnectionPool:
-    pool = AsyncConnectionPool(conninfo, min_size=1, max_size=10, open=False)
+    # The check discards connections the server closed (for example after a
+    # PostgreSQL restart) instead of handing them to a request.
+    pool = AsyncConnectionPool(
+        conninfo,
+        min_size=1,
+        max_size=10,
+        open=False,
+        check=AsyncConnectionPool.check_connection,
+    )
     try:
         await pool.open(wait=True, timeout=CONNECT_TIMEOUT_SECONDS)
     except psycopg.OperationalError as exc:
         await pool.close()
         raise DatabaseUnavailable(f"PostgreSQL is unreachable at {describe_target(conninfo)}") from exc
     return pool
+
+
+@asynccontextmanager
+async def connection(pool: AsyncConnectionPool) -> AsyncIterator[psycopg.AsyncConnection]:
+    try:
+        async with pool.connection(timeout=REQUEST_CONNECTION_TIMEOUT_SECONDS) as conn:
+            yield conn
+    except psycopg.OperationalError as exc:
+        raise GatewayError(503, "database_unavailable", "The database is unavailable.") from exc
 
 
 async def ping(pool: AsyncConnectionPool) -> bool:

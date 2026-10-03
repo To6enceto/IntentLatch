@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request, Response
 from . import db
 from .errors import error_response, install_error_handlers
 from .llms import CorporateLlms
-from .routes import health, ollama, openai
+from .routes import admin, health, ollama, openai
 from .settings import load_settings
 
 CONNECT_TIMEOUT_SECONDS = 5
@@ -81,6 +81,7 @@ def create_app(ollama_transport: httpx.AsyncBaseTransport | None = None) -> Fast
     app.include_router(health.router)
     app.include_router(openai.router)
     app.include_router(ollama.router)
+    app.include_router(admin.router)
     return app
 
 
