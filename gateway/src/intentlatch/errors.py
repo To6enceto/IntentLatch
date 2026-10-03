@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 HTTP_ERROR_CODES = {400: "invalid_request", 404: "not_found", 405: "method_not_allowed"}
@@ -27,7 +28,7 @@ def error_response(
     )
 
 
-def describe_validation_error(exc: RequestValidationError) -> str:
+def describe_validation_error(exc: RequestValidationError | ValidationError) -> str:
     errors = exc.errors()
     if not errors:
         return "Invalid request."

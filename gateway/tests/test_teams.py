@@ -49,6 +49,13 @@ def test_employee_name_is_trimmed_and_length_checked():
         EmployeeCreate(name=" ")
 
 
+def test_nul_in_a_name_is_rejected():
+    with pytest.raises(ValidationError, match="NUL"):
+        TeamCreate(name="nul\x00team", authorized_models=["corporate-a"])
+    with pytest.raises(ValidationError, match="NUL"):
+        EmployeeCreate(name="nul\x00emp")
+
+
 def test_non_string_name_is_rejected():
     with pytest.raises(ValidationError):
         TeamCreate(name=42, authorized_models=["corporate-a"])
