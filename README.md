@@ -61,6 +61,17 @@ curl -s localhost:8080/v1/chat/completions -H "Authorization: Bearer $TOKEN" \
   -d '{"model": "corporate-a", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
+## Check what a token may do
+
+Any system can ask what a token is allowed to do. The answer comes from the
+database at that moment.
+
+```bash
+curl -s localhost:8080/authority -H 'content-type: application/json' -d "{\"token\": \"$TOKEN\"}"
+# -> {"valid": true, "employee": {...}, "team": {...}, "authorized_models": ["corporate-a"]}
+# -> {"valid": false, "reason": "token_revoked"}   (or "token_invalid"); nothing else is revealed
+```
+
 Models are `corporate-a` and `corporate-b`. Until the authority policy lands,
 any valid token can call both. Reissue a token with
 `POST /admin/employees/<employee-id>/token`; revoke an employee with
