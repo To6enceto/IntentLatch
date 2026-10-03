@@ -72,7 +72,34 @@ curl -s localhost:8080/authority -H 'content-type: application/json' -d "{\"toke
 # -> {"valid": false, "reason": "token_revoked"}   (or "token_invalid"); nothing else is revealed
 ```
 
-Models are `corporate-a` and `corporate-b`. Until the authority policy lands,
-any valid token can call both. Reissue a token with
-`POST /admin/employees/<employee-id>/token`; revoke an employee with
-`POST /admin/employees/<employee-id>/revoke`.
+Models are `corporate-a` and `corporate-b`. The `AUTH-MODEL` policy is stored
+but not enforced until the policy pipeline lands, so any valid token can call
+both. Reissue a token with `POST /admin/employees/<employee-id>/token`; revoke
+an employee with `POST /admin/employees/<employee-id>/revoke`.
+
+## Manage policies
+
+A policy is either an AI policy (`ai: true` with a `text` rule) or a non-AI
+policy of one `kind`: `authority`, `limit` or `regex`. Codes are unique and
+uppercased (`rgx-example` becomes `RGX-EXAMPLE`); a policy's `code`, `ai` and `kind`
+cannot change after creation, and there is no delete: disable it instead. Every
+create and edit bumps one global policy `version`. The gateway seeds missing
+defaults from `gateway/src/intentlatch/policy_seeds.json` at startup and never
+overwrites an existing policy.
+
+```bash
+curl -s localhost:8080/admin/policies -H "$ADMIN"
+# -> {"policies": [{"code": "AUTH-MODEL", ...}], "version": 1}
+
+curl -s localhost:8080/admin/policies -H "$ADMIN" -H 'content-type: application/json' \
+  -d '{"code": "RGX-EXAMPLE", "ai": false, "kind": "regex", "params": {"pattern": "(?i)\\bPL\\d{26}\\b"},
+       "action": "edit", "applies_to": "both", "enabled": true}'
+# -> {"policy": {"code": "RGX-EXAMPLE", ...}, "version": 2}
+
+curl -s -X PATCH localhost:8080/admin/policies/RGX-EXAMPLE -H "$ADMIN" \
+  -H 'content-type: application/json' -d '{"enabled": false}'
+# -> {"policy": {"code": "RGX-EXAMPLE", "enabled": false, ...}, "version": 3}
+```
+
+Limit policies take `{"max_tokens": int, "window_seconds": int, "team": "<team name>" | null}`;
+authority and limit policies always `block` and apply to prompts only.

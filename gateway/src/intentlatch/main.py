@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Response
 
-from . import db
+from . import db, policies
 from .errors import error_response, install_error_handlers
 from .llms import CorporateLlms
 from .routes import admin, authority, health, ollama, openai
@@ -34,10 +34,13 @@ def create_app(ollama_transport: httpx.AsyncBaseTransport | None = None) -> Fast
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings = load_settings()
+        seeds = policies.load_seeds()
         applied = await db.migrate(settings.database_url, db.MIGRATIONS_DIR)
         log.info("database migrations applied: %d", len(applied))
         pool = await db.open_pool(settings.database_url)
         try:
+            seeded = await policies.seed_policies(pool, seeds)
+            log.info("policy seeds inserted: %d", seeded)
             async with httpx.AsyncClient(
                 base_url=settings.ollama_url,
                 timeout=httpx.Timeout(settings.upstream_timeout_seconds, connect=CONNECT_TIMEOUT_SECONDS),

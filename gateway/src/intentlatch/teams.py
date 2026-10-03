@@ -25,6 +25,9 @@ def clean_name(value: str, limit: int) -> str:
     name = value.strip()
     if not 1 <= len(name) <= limit:
         raise ValueError(f"must be 1 to {limit} characters after trimming")
+    # PostgreSQL text cannot hold NUL, so it is a validation error, not a 500.
+    if "\x00" in name:
+        raise ValueError("must not contain NUL characters")
     return name
 
 

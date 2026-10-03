@@ -1,0 +1,10 @@
+[
+  {
+    "code": "AUTH-MODEL",
+    "ai": false,
+    "kind": "authority",
+    "action": "block",
+    "applies_to": "prompt",
+    "enabled": true
+  }
+]
