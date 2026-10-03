@@ -3,6 +3,7 @@
 import argparse
 from contextlib import contextmanager
 import getpass
+import ipaddress
 import json
 import socket
 import ssl
@@ -202,7 +203,9 @@ def webui_test(base, email):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bootstrap-only", action="store_true")
-    parser.add_argument("--domain")
+    address = parser.add_mutually_exclusive_group()
+    address.add_argument("--domain")
+    address.add_argument("--public-ip", type=ipaddress.IPv4Address)
     parser.add_argument("--staging", action="store_true", help="Explicitly accept the untrusted ACME staging certificate")
     parser.add_argument("--webui-email")
     parser.add_argument("--port", type=int, default=8080)
@@ -218,18 +221,26 @@ def main():
     network_proof()
     with forward("agents", "open-webui", 8080) as base:
         webui_test(base, args.webui_email)
-    if args.domain:
+    if args.domain or args.public_ip:
         tls = ssl._create_unverified_context() if args.staging else ssl.create_default_context()
-        base = "https://api." + args.domain
+        host = str(args.public_ip) if args.public_ip else args.domain
+        base = "https://" + host + ":9443" if args.public_ip else "https://api." + host
+        chat = "https://" + host if args.public_ip else "https://chat." + host
+        grafana = "https://" + host + ":8443" if args.public_ip else "https://grafana." + host
         assert json.loads(request(base, "/healthz", tls=tls))["database"] == "ok"
-        request(base, "/admin/teams", expected=404, tls=tls)
-        request(base, "/metrics", expected=404, tls=tls)
+        for path in ["/admin/teams", "/metrics", "/docs", "/openapi.json"]:
+            request(base, path, expected=404, tls=tls)
+        request(base, "/v1/models", expected=401, tls=tls)
+        assert len(json.loads(request(base, "/v1/models", token=token, tls=tls))["data"]) == 2
         request(base, "/v1/chat/completions", token=token, expected=413, tls=tls,
                 body={"model": "corporate-b", "messages": [{"role": "user", "content": "x" * (1024 * 1024)}]})
-        assert "<html" in request("https://chat." + args.domain, "/", tls=tls).lower()
-        print("PASS: public health, private admin/metrics paths, 1MiB body limit, and chat page")
+        assert "<html" in request(chat, "/", tls=tls).lower()
+        request(chat, "/api/models", expected=401, tls=tls)
+        assert json.loads(request(grafana, "/api/health", tls=tls))["database"] == "ok"
+        request(grafana, "/api/user", expected=401, tls=tls)
+        print("PASS: public TLS, health, API authentication, private admin/metrics/docs, 1MiB body limit, Chat, and Grafana")
     else:
-        print("NOT TESTED: public DNS/TLS/edge, no domain supplied")
+        print("NOT TESTED: public TLS/edge, no domain or public IP supplied")
     print("Completed the enabled smoke checks. Gateway errors include X-Request-ID and response body; report upstream incompatibilities to the gateway owner.")
 
 

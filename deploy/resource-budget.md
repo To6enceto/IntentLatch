@@ -28,11 +28,12 @@ the dedicated worker. Gateway replicas spread across the two general workers.
 | kube-state-metrics | 1 | 30m / 200m | 64Mi / 128Mi | General |
 | node-exporter | 3 | 20m / 100m | 32Mi / 64Mi | Every worker, Ollama toleration |
 | Sealed Secrets | 1 | 25m / 200m | 64Mi / 128Mi | General |
-| Envoy data plane, when enabled | 2 | 100m / 500m | 128Mi / 256Mi | General, spread preferred |
-| Envoy Gateway controller, when enabled | 1 | 100m / 500m | 128Mi / 256Mi | General |
-| cert-manager controller, when enabled | 1 | 25m / 200m | 64Mi / 128Mi | General |
-| cert-manager cainjector, when enabled | 1 | 25m / 200m | 64Mi / 128Mi | General |
-| cert-manager webhook, when enabled | 1 | 25m / 100m | 32Mi / 64Mi | General |
+| Envoy data plane | 2 | 100m / 500m | 128Mi / 256Mi | General, spread preferred |
+| Envoy shutdown manager | 2 | 10m / unbounded | 32Mi / unbounded | With each Envoy proxy |
+| Envoy Gateway controller | 1 | 100m / 500m | 128Mi / 256Mi | General |
+| cert-manager controller | 1 | 25m / 200m | 64Mi / 128Mi | General |
+| cert-manager cainjector | 1 | 25m / 200m | 64Mi / 128Mi | General |
+| cert-manager webhook | 1 | 25m / 100m | 32Mi / 64Mi | General |
 | Model pull/warm-up Job, temporary | 1 | 50m / 250m | 64Mi / 128Mi | General |
 | Envoy certificate generation Job, temporary | 1 | 10m / 100m | 32Mi / 64Mi | General via taint exclusion |
 | cert-manager startup check, temporary | 1 | 10m / 100m | 32Mi / 64Mi | General via taint exclusion |
@@ -56,7 +57,7 @@ Pods with no requests still consume real resources. The arithmetic below sums
 declared values and leaves headroom; it does not treat those processes as free.
 Use `kubectl top nodes` and `kubectl top pods -A` after real model inference.
 
-## Feasible per-node packing, including the future edge
+## Feasible per-node packing, including the public edge
 
 One example packing uses `3x1f3m` for PostgreSQL, Prometheus/reloader,
 kube-state-metrics, Envoy controller, cert-manager's three controllers, and one
@@ -68,13 +69,15 @@ node-exporter. The Ollama worker includes its current system pods and exporter.
 | Worker suffix | CPU requests / allocatable | Memory requests / allocatable | Sum of configured CPU limits | Sum of configured memory limits |
 | --- | ---: | ---: | ---: | ---: |
 | `3x1f37` | 2432m / 3890m | 4540Mi / 6414Mi | 4100m + unbounded pods | 5996Mi + unbounded pods |
-| `3x1f3m` | 1547m / 3890m | 2662Mi / 6414Mi | 5900m + unbounded pods | 5654Mi + unbounded pods |
-| `3x1f3q` | 1462m / 3890m | 2182Mi / 6414Mi | 5400m + unbounded pods | 5206Mi + unbounded pods |
-| Total | 5441m / 11670m | 9384Mi / 19242Mi | CPU is overcommitted | 16856Mi + unbounded pods |
+| `3x1f3m` | 1557m / 3890m | 2694Mi / 6414Mi | 5900m + unbounded pods | 5654Mi + unbounded pods |
+| `3x1f3q` | 1472m / 3890m | 2214Mi / 6414Mi | 5400m + unbounded pods | 5206Mi + unbounded pods |
+| Total | 5461m / 11670m | 9448Mi / 19242Mi | CPU is overcommitted | 16856Mi + unbounded pods |
 
 This is a feasible packing, not a promise of exact scheduler decisions. Apart
 from dedicated Ollama placement and gateway spread, general workloads remain
-movable.
+movable. The public edge was enabled on 4 October 2026. Envoy Gateway
+adds a shutdown-manager sidecar to each proxy; its default requests are
+included above, and it has no configured limits.
 
 Live installation on 4 October required raising Grafana from 256Mi to 512Mi and
 its dashboard sidecar from 64Mi to 128Mi after both hit their initial memory
@@ -89,7 +92,7 @@ kubectl top nodes
 kubectl top pods -A --sort-by=memory
 ```
 
-Without the future edge, subtract 375m CPU / 544Mi memory in total requests and
+Without the public edge, subtract 395m CPU / 608Mi memory in total requests and
 2000m CPU / 1088Mi in configured limits. The temporary model Job adds 50m/64Mi
 requests and 250m/128Mi limits on a general worker while downloads are open.
 CPU limit overcommit can cause throttling when many workloads peak together;

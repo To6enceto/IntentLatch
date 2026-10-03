@@ -1,7 +1,12 @@
 # IntentLatch Kubernetes cluster: resources and architecture
 
 Verified against the running DigitalOcean cluster and installed Helm manifests
-on **4 October 2026**, Europe/Sofia time.
+on **4 October 2026**, Europe/Sofia time, before public ingress was installed.
+
+**Public access update:** Chat, Grafana, and the filtered model API now have a
+persistent HTTPS edge. See [Public access](public-access.md) for the current
+addresses, added resources, and certificate renewal. The counts, CSV inventory,
+and private-only architecture below retain the original pre-ingress snapshot.
 
 This is a snapshot of the deployed gateway image built from commit `b1b0289`.
 The repository now also contains later policy-store, authority-policy pipeline,

@@ -209,6 +209,23 @@ def main():
                    "sealedSecrets.schemaCheck.name=schema-check", "sealedSecrets.schemaCheck.namespace=agents",
                    "sealedSecrets.schemaCheck.encryptedData.placeholder=AgSchemaValidationOnly")
     verify(cloud)
+    ip_bootstrap = render("edge.enabled=true", "edge.mode=ip", "webui.enableSignup=false")
+    ip_ready = render("edge.enabled=true", "edge.mode=ip", "edge.publicIP=203.0.113.10", "webui.enableSignup=false")
+    for docs in [ip_bootstrap, ip_ready]:
+        verify(docs)
+        gateway = next(d for d in docs if d["kind"] == "Gateway")
+        assert all("hostname" not in l for l in gateway["spec"]["listeners"])
+        assert all("hostnames" not in d["spec"] for d in docs if d["kind"] == "HTTPRoute")
+        assert all(d["spec"]["acme"]["profile"] == "shortlived" for d in docs if d["kind"] == "ClusterIssuer")
+        http_routes = [d for d in docs if d["kind"] == "HTTPRoute" and any(p.get("sectionName") == "http" for p in d["spec"]["parentRefs"])]
+        assert len(http_routes) == 1
+        assert all("backendRefs" not in rule for rule in http_routes[0]["spec"]["rules"])
+    assert not any(d["kind"] == "Certificate" for d in ip_bootstrap)
+    assert [l["port"] for d in ip_bootstrap if d["kind"] == "Gateway" for l in d["spec"]["listeners"]] == [80]
+    assert {l["name"]: l["port"] for d in ip_ready if d["kind"] == "Gateway" for l in d["spec"]["listeners"]} == {"http": 80, "chat": 443, "grafana": 8443, "api": 9443}
+    certificate = next(d["spec"] for d in ip_ready if d["kind"] == "Certificate")
+    assert certificate["ipAddresses"] == ["203.0.113.10"] and "dnsNames" not in certificate
+    assert certificate["duration"] == "160h" and certificate["renewBefore"] == "48h"
     verify(render(local=True), local=True)
     verify(render("ollama.pull.enabled=true"), pulling=True)
     verify(render("ollama.pull.enabled=true", local=True), pulling=True, local=True)
@@ -218,7 +235,7 @@ def main():
     result = subprocess.run(["helm", "template", "test", CHART, "--set", "edge.enabled=true"], capture_output=True)
     assert result.returncode != 0
     if args.third_party_dir or args.fetch:
-        third_party(args.third_party_dir or DEPLOY / ".state" / "validation-charts", args.fetch, cloud)
+        third_party(args.third_party_dir or DEPLOY / ".state" / "validation-charts", args.fetch, cloud + ip_bootstrap + ip_ready)
 
 
 if __name__ == "__main__":

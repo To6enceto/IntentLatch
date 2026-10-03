@@ -25,8 +25,9 @@ installation objects and their purposes from the live cluster snapshot.
 - Public image under `ghcr.io/antonstwork/intentlatch-gateway`, as subsequently
   authorized after GHCR denied package creation under `to6enceto`.
 - Plain Helm. No Argo CD, Loki, Tempo, or Discord webhook.
-- No domain yet. Initial installation uses localhost port-forwards and creates
-  **zero** load balancers. Enabling the prepared edge creates exactly one.
+- No domain. Public access uses one DigitalOcean load balancer with HTTPS for
+  its IP address: Chat on 443, Grafana on 8443, and the model API on 9443.
+  Initial application installation still creates zero load balancers until `make edge`.
 - Alertmanager receives the local availability/budget rules with a null receiver;
   it sends no external notifications.
 
@@ -119,7 +120,8 @@ helm upgrade --install monitoring kube-prometheus-stack \
   --repo https://prometheus-community.github.io/helm-charts --version 91.9.0 \
   -n observability -f deploy/third-party/monitoring.yaml --wait
 helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9.2 \
-  -n envoy-gateway-system --create-namespace -f deploy/third-party/envoy-gateway.yaml --wait
+  -n envoy-gateway-system --create-namespace -f deploy/third-party/envoy-gateway.yaml \
+  --set crds.enabled=false --wait
 helm upgrade --install cert-manager cert-manager \
   --repo https://charts.jetstack.io --version v1.21.2 \
   -n cert-manager --create-namespace -f deploy/third-party/cert-manager.yaml --wait
@@ -128,7 +130,16 @@ helm upgrade --install cert-manager cert-manager \
 Prefer the Make targets for lifecycle operations: they record created CRDs for
 teardown. The commands above show the exact upstream inputs. Operators must
 precede application resources that use their CRDs. Envoy installs compatible
-Gateway API CRDs before cert-manager starts. cert-manager explicitly sets
+Gateway API CRDs before cert-manager starts, then installs the controller with
+`crds.enabled=false`. The script checks stored API versions and preserves the
+`TLSRoute/v1alpha2` endpoint required by DOKS Cilium. It upgrades the existing
+v1.2.1 definitions to the pinned chart's v1.6.1 bundle using server-side apply;
+DOKS recognizes and preserves a newer bundle. The original definitions are
+backed up under `.state/cloud/gateway-crds-before.json`. The six pre-existing
+CRDs remain outside Helm ownership and are never deleted by teardown. See
+[DigitalOcean's third-party Gateway API guidance](https://docs.digitalocean.com/products/kubernetes/how-to/use-gateway-api/#preserve-third-party-gateway-crds).
+Install these definitions before running the manual Envoy Helm command above.
+cert-manager explicitly sets
 `config.enableGatewayAPI: true`.
 
 Sealed Secrets is the requested open-source controller, published upstream as
@@ -282,7 +293,7 @@ smoke checks. It does not enable public access. For inspection between steps:
    not depend on the missing endpoint. Budget rules become useful when metrics
    land. The latency panel assumes a histogram; confirm that type with the
    gateway owner.
-10. **Envoy and cert-manager, later when a domain exists.** Follow section 6.
+10. **Envoy and cert-manager, for public IP or domain access.** Follow section 6.
     Verify controllers, Gateway conditions, route attachment, and certificate.
 11. **DNS, later.** Create the wildcard A record described in section 6.
     Verify `dig +short api.YOUR_DOMAIN` returns the load balancer IP.
@@ -295,8 +306,8 @@ smoke checks. It does not enable public access. For inspection between steps:
     The optional WebUI login test prompts for the password without echoing it.
     Without `--webui-email`, HTML loading is tested and judge login/prompt is
     explicitly reported as untested. In a browser, log in as a judge, choose
-    each corporate model, and check that both answer. No domain means the
-    public-edge checks are explicitly skipped.
+    each corporate model, and check that both answer. Use `--public-ip IP` when no domain is configured. Without either address,
+    the public-edge checks are explicitly skipped.
 
 After installation, `make -C deploy access` holds all three localhost forwards
 open: chat at `http://localhost:3000`, Grafana at `http://localhost:3001`, and
@@ -353,7 +364,49 @@ pods are placed with the edge certificate in `envoy-gateway-system`, where Envoy
 can reach them. Prometheus needs API/service discovery and node/kubelet scrapes;
 Grafana's ingress policy also allows its metrics scrape from Prometheus pods.
 
-## 6. Enable the public edge after choosing a domain
+## 6. Enable the public edge
+
+For the deployed addresses and login instructions, see [Public access](public-access.md).
+A single regional load balancer handles all ports, independently of the laptop.
+
+### Public IP with HTTPS
+
+Create WebUI administrator/judge accounts privately first, then:
+
+```bash
+cp deploy/site-values-ip.example.yaml deploy/site-values.yaml
+make -C deploy edge
+```
+
+The script initially creates only an HTTP listener for ACME challenges and
+HTTPS redirection. It discovers the allocated public IP, saves it in the ignored
+site file, and enables HTTPS on ports 443 (Chat), 8443 (Grafana), and 9443 (API).
+No application login is served over plain HTTP. Hostname constraints are omitted
+in IP mode because Gateway API does not accept literal IP hostnames.
+
+The certificate has an IP address SAN. Both issuers use Let's Encrypt's
+`shortlived` profile: certificates last 160 hours and cert-manager renews them
+48 hours before expiry, with private-key rotation. No domain, DNS changes, or
+ACME email is required. Keep port 80 reachable for automatic HTTP-01 renewal.
+[Let's Encrypt IP certificate documentation](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability).
+
+First verify the staging certificate using the saved IP:
+
+```bash
+make -C deploy smoke SMOKE_ARGS='--public-ip YOUR_IP --staging --port 0'
+```
+
+Then change `edge.issuer` in `deploy/site-values.yaml` to
+`letsencrypt-production` and rerun `make -C deploy edge`. Verify the resulting
+certificate using the same smoke command without `--staging`. The script checks
+the Ready condition for the current certificate generation. Browsers should
+accept the production certificate without an exception.
+
+The IP remains assigned while the load-balancer Service exists. Deleting and
+recreating that Service can change it; rerun `make edge` to discover the new IP
+and request a matching certificate. Existing login credentials remain valid.
+
+### DNS domain alternative
 
 Copy `deploy/site-values.example.yaml` to `deploy/site-values.yaml`, replace
 the domain/email, and keep `webui.enableSignup: false`. Configure the first

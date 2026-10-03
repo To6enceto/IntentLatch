@@ -1,7 +1,14 @@
 {{- if .Values.edge.enabled }}
 {{- if eq .Values.profile "local" }}{{ fail "The local profile uses port-forwards, not a public edge" }}{{- end }}
-{{- $domain := required "Set edge.domain before enabling edge" .Values.edge.domain }}
-{{- $email := required "Set edge.acmeEmail before enabling edge" .Values.edge.acmeEmail }}
+{{- $ipMode := eq (.Values.edge.mode | default "domain") "ip" }}
+{{- if not (has (.Values.edge.mode | default "domain") (list "domain" "ip")) }}{{ fail "edge.mode must be domain or ip" }}{{- end }}
+{{- $domain := .Values.edge.domain }}
+{{- $email := .Values.edge.acmeEmail }}
+{{- if not $ipMode }}
+{{- $domain = required "Set edge.domain before enabling edge" $domain }}
+{{- $email = required "Set edge.acmeEmail before enabling edge" $email }}
+{{- end }}
+{{- $tlsReady := or (not $ipMode) (not (empty .Values.edge.publicIP)) }}
 {{- if .Values.webui.enableSignup }}{{ fail "Bootstrap WebUI locally, then set webui.enableSignup=false before enabling edge" }}{{- end }}
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
@@ -33,6 +40,7 @@ spec:
         externalTrafficPolicy: Local
         annotations:
           # TLS terminates in Envoy. The DO load balancer forwards TCP.
+          service.beta.kubernetes.io/do-loadbalancer-type: REGIONAL
           service.beta.kubernetes.io/do-loadbalancer-protocol: tcp
           service.beta.kubernetes.io/do-loadbalancer-size-unit: "1"
           service.beta.kubernetes.io/do-loadbalancer-name: intentlatch-edge
@@ -63,11 +71,14 @@ spec:
       port: 80
       allowedRoutes:
         namespaces: {from: Same}
+    {{- if $tlsReady }}
     {{- range $host := list "api" "chat" "grafana" }}
     - name: {{ $host }}
+      {{- if not $ipMode }}
       hostname: {{ printf "%s.%s" $host $domain | quote }}
+      {{- end }}
       protocol: HTTPS
-      port: 443
+      port: {{ if $ipMode }}{{ get (dict "chat" 443 "grafana" 8443 "api" 9443) $host }}{{ else }}443{{ end }}
       tls:
         mode: Terminate
         certificateRefs: [{name: intentlatch-edge-tls}]
@@ -76,6 +87,7 @@ spec:
           from: Selector
           selector:
             matchLabels: {intentlatch.io/managed: "true"}
+    {{- end }}
     {{- end }}
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
@@ -100,11 +112,13 @@ metadata:
   namespace: envoy-gateway-system
 spec:
   parentRefs: [{name: intentlatch, sectionName: http}]
+  {{- if not $ipMode }}
   hostnames: [{{ printf "api.%s" $domain | quote }}, {{ printf "chat.%s" $domain | quote }}, {{ printf "grafana.%s" $domain | quote }}]
+  {{- end }}
   rules:
     - filters:
         - type: RequestRedirect
-          requestRedirect: {scheme: https, statusCode: 301}
+          requestRedirect: {scheme: https, port: 443, statusCode: 301}
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -113,7 +127,9 @@ metadata:
   namespace: intentlatch-system
 spec:
   parentRefs: [{name: intentlatch, namespace: envoy-gateway-system, sectionName: api}]
+  {{- if not $ipMode }}
   hostnames: [{{ printf "api.%s" $domain | quote }}]
+  {{- end }}
   rules:
     - matches:
         - path: {type: PathPrefix, value: /v1}
@@ -141,7 +157,9 @@ metadata:
   namespace: agents
 spec:
   parentRefs: [{name: intentlatch, namespace: envoy-gateway-system, sectionName: chat}]
+  {{- if not $ipMode }}
   hostnames: [{{ printf "chat.%s" $domain | quote }}]
+  {{- end }}
   rules:
     - timeouts: {request: 360s, backendRequest: 360s}
       backendRefs: [{name: open-webui, port: 8080}]
@@ -153,7 +171,9 @@ metadata:
   namespace: observability
 spec:
   parentRefs: [{name: intentlatch, namespace: envoy-gateway-system, sectionName: grafana}]
+  {{- if not $ipMode }}
   hostnames: [{{ printf "grafana.%s" $domain | quote }}]
+  {{- end }}
   rules:
     - timeouts: {request: 360s, backendRequest: 360s}
       backendRefs: [{name: monitoring-grafana, port: 80}]
@@ -165,7 +185,12 @@ metadata:
   name: letsencrypt-{{ $environment }}
 spec:
   acme:
+    {{- if $email }}
     email: {{ $email | quote }}
+    {{- end }}
+    {{- if $ipMode }}
+    profile: shortlived
+    {{- end }}
     server: {{ $server }}
     privateKeySecretRef: {name: intentlatch-acme-{{ $environment }}}
     solvers:
@@ -174,6 +199,7 @@ spec:
             parentRefs:
               - {name: intentlatch, namespace: envoy-gateway-system, kind: Gateway, sectionName: http}
 {{- end }}
+{{- if $tlsReady }}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -183,5 +209,13 @@ metadata:
 spec:
   secretName: intentlatch-edge-tls
   issuerRef: {name: {{ .Values.edge.issuer }}, kind: ClusterIssuer}
+  {{- if $ipMode }}
+  ipAddresses: [{{ .Values.edge.publicIP | quote }}]
+  duration: 160h
+  renewBefore: 48h
+  {{- else }}
   dnsNames: [{{ printf "api.%s" $domain | quote }}, {{ printf "chat.%s" $domain | quote }}, {{ printf "grafana.%s" $domain | quote }}]
+  {{- end }}
+  privateKey: {rotationPolicy: Always}
+{{- end }}
 {{- end }}

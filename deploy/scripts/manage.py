@@ -3,13 +3,17 @@
 import argparse
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import platform
 import shutil
 import sys
 import tarfile
+import time
 import urllib.request
+
+import yaml
 
 from common import (APP_NAMESPACES, CHART, CONTEXT, DEPLOY, HELM, KUBE,
                     PROFILE, REPO, SEALED, STATE, app_values, atomic_json,
@@ -123,6 +127,46 @@ def component(name):
     if name == "monitoring" and PROFILE == "local":
         args += ["-f", str(DEPLOY / "third-party" / "monitoring-local.yaml")]
     try:
+        if name == "envoy":
+            # DOKS preserves newer bundles. Apply CRDs separately so Helm does
+            # not claim ownership of the provider's pre-existing definitions.
+            crds = run([*HELM, "show", "crds", chart, "--version", VERSIONS[version]], capture=True).stdout
+            class Loader(yaml.SafeLoader):
+                pass
+            Loader.add_constructor("tag:yaml.org,2002:value", Loader.construct_scalar)
+            documents = [d for d in yaml.load_all(crds, Loader=Loader) if d]
+            existing = {d["metadata"]["name"]: d for d in kube_json("get", "crds")["items"]}
+            provider_upgrade = False
+            for doc in documents:
+                old = existing.get(doc["metadata"]["name"])
+                if not old:
+                    continue
+                old_bundle = old["metadata"].get("annotations", {}).get("gateway.networking.k8s.io/bundle-version")
+                new_bundle = doc["metadata"].get("annotations", {}).get("gateway.networking.k8s.io/bundle-version")
+                if old_bundle and new_bundle:
+                    if tuple(map(int, old_bundle.lstrip("v").split("."))) > tuple(map(int, new_bundle.lstrip("v").split("."))):
+                        raise RuntimeError("Refusing to downgrade Gateway API CRDs")
+                    if old_bundle != new_bundle:
+                        if PROFILE != "cloud" or doc["metadata"]["name"] not in state["baseline_crds"]:
+                            raise RuntimeError("Inspect the existing Gateway API CRD owner before upgrading")
+                        provider_upgrade = True
+                served = {v["name"] for v in doc["spec"]["versions"] if v["served"]}
+                required = set(old["status"].get("storedVersions", []))
+                if doc["metadata"]["name"] == "tlsroutes.gateway.networking.k8s.io":
+                    required.add("v1alpha2")  # Required by DOKS Cilium.
+                if not required <= served:
+                    raise RuntimeError("CRD upgrade would remove required versions: " + doc["metadata"]["name"])
+            backup = STATE / "gateway-crds-before.json"
+            if not backup.exists():
+                atomic_json(backup, [existing[d["metadata"]["name"]] for d in documents if d["metadata"]["name"] in existing])
+            apply_args = [*KUBE, "apply", "--server-side", "--field-manager=intentlatch-edge", "-f", "-"]
+            if provider_upgrade:
+                # Transfer the validated older DOKS bundle's schema fields.
+                # DOKS detects the newer bundle and stops reconciling it.
+                apply_args += ["--force-conflicts"]
+            run([*apply_args, "--dry-run=server"], data=crds)
+            run(apply_args, data=crds)
+            args += ["--set", "crds.enabled=false"]
         run(args)
     finally:
         after = {c["metadata"]["name"] for c in kube_json("get", "crds")["items"]}
@@ -178,12 +222,53 @@ def edge():
     inventory()
     site = DEPLOY / "site-values.yaml"
     if not site.exists():
-        raise RuntimeError("Create deploy/site-values.yaml with edge.domain, edge.acmeEmail, and webui.enableSignup=false")
+        raise RuntimeError("Create deploy/site-values.yaml using a domain or edge.mode=ip, with webui.enableSignup=false")
+    config = yaml.safe_load(site.read_text())
+    ip_mode = config.get("edge", {}).get("mode") == "ip"
+    if ip_mode and config["edge"].get("publicIP"):
+        ipaddress.IPv4Address(config["edge"]["publicIP"])
     run([*HELM, "template", "intentlatch", CHART, *app_values(), "--set", "edge.enabled=true"], capture=True)
     component("envoy")
     component("cert-manager")
     run([*HELM, "upgrade", "intentlatch", CHART, "-n", "default", "--reuse-values", "-f", site,
          "--set", "edge.enabled=true", "--wait", "--timeout", "15m"])
+    if ip_mode:
+        deadline = time.monotonic() + 900
+        public_ip = None
+        while time.monotonic() < deadline:
+            services = kube_json("-n", "envoy-gateway-system", "get", "services", "-l", "gateway.envoyproxy.io/owning-gateway-name=intentlatch")["items"]
+            addresses = [a["ip"] for s in services for a in s.get("status", {}).get("loadBalancer", {}).get("ingress", [])
+                         if a.get("ip") and ipaddress.ip_address(a["ip"]).version == 4]
+            if addresses:
+                public_ip = str(ipaddress.ip_address(addresses[0]))
+                break
+            print("Waiting for the DigitalOcean load balancer IP...", flush=True)
+            time.sleep(10)
+        if not public_ip:
+            raise RuntimeError("Load balancer IP not allocated within 15 minutes")
+        if config["edge"].get("publicIP") != public_ip:
+            config["edge"]["publicIP"] = public_ip
+            temporary = site.with_suffix(".yaml.tmp")
+            temporary.write_text(yaml.safe_dump(config, sort_keys=False))
+            temporary.replace(site)
+            run([*HELM, "upgrade", "intentlatch", CHART, "-n", "default", "--reuse-values", "-f", site,
+                 "--set", "edge.enabled=true", "--wait", "--timeout", "15m"])
+        deadline = time.monotonic() + 900
+        while time.monotonic() < deadline:
+            certificate = kube_json("-n", "envoy-gateway-system", "get", "certificate", "intentlatch-edge")
+            if any(c["type"] == "Ready" and c["status"] == "True" and c.get("observedGeneration") == certificate["metadata"]["generation"]
+                   for c in certificate.get("status", {}).get("conditions", [])):
+                break
+            print("Waiting for the current certificate generation...", flush=True)
+            time.sleep(10)
+        else:
+            raise RuntimeError("Certificate was not issued within 15 minutes; inspect Orders and Challenges")
+        print(f"Chat https://{public_ip}/ | Grafana https://{public_ip}:8443/ | API https://{public_ip}:9443/")
+        issuer = config["edge"].get("issuer", "letsencrypt-staging")
+        print("Issuer: " + issuer)
+        if issuer == "letsencrypt-staging":
+            print("Staging certificates are not browser-trusted; switch to letsencrypt-production after validation.")
+        return
     print("Create your wildcard DNS A record after the load balancer IP appears:")
     run([*KUBE, "-n", "envoy-gateway-system", "get", "gateway", "intentlatch"])
     run([*KUBE, "-n", "envoy-gateway-system", "get", "services"])

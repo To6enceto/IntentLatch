@@ -76,12 +76,15 @@ monitoring:
   release: monitoring
 
 edge:
-  # No domain has been selected. Enabling requires domain and acmeEmail.
+  # domain uses DNS names; ip uses ports 443 (Chat), 8443 (Grafana), 9443 (API).
   enabled: false
+  mode: domain
+  # Empty in IP mode during HTTP-01/load-balancer bootstrap only.
+  publicIP: ""
   domain: ""
   acmeEmail: ""
   issuer: letsencrypt-staging
-  envoyImage: envoyproxy/envoy:distroless-v1.37.2
+  envoyImage: docker.io/envoyproxy/envoy:distroless-v1.39.1@sha256:eb2c01c13125d1629637cb4e4cce7207009fb7cc2c8027f9742758549d15b6f4
   replicas: 2
   resources:
     requests: {cpu: 100m, memory: 128Mi}
