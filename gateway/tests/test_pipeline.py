@@ -1,11 +1,13 @@
 import base64
 import json
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 
 from intentlatch.errors import error_response
 from intentlatch.identity import Identity
+from intentlatch.limits import WindowUsage
 from intentlatch.pipeline import (
     authority_result,
     blocked_error,
@@ -26,6 +28,7 @@ IDENTITY = Identity(
 PROMPT_REASON = "The prompt matches this policy's pattern."
 RESPONSE_REASON = "The response matches this policy's pattern."
 CARD_PATTERN = r"\b(?P<luhn>\d{4}(?: ?\d{4}){3})\b"
+WINDOW_END = datetime(2026, 10, 4, 2, 0, tzinfo=UTC)
 
 
 def policy(code: str, kind: str | None = "authority", **changes) -> Policy:
@@ -45,12 +48,28 @@ def regex(code: str, pattern: str, action: str = "block", applies_to: str = "bot
     return policy(code, kind="regex", params={"pattern": pattern}, action=action, applies_to=applies_to)
 
 
+def limit(code: str, max_tokens: int = 1000, window_seconds: int = 3600, team: str | None = "Payments") -> Policy:
+    params = {"max_tokens": max_tokens, "window_seconds": window_seconds, "team": team}
+    return policy(code, kind="limit", params=params)
+
+
+def used(tokens: int, window_seconds: int = 3600) -> dict[int, WindowUsage]:
+    return {window_seconds: WindowUsage(used=tokens, ends=WINDOW_END)}
+
+
+def limit_reason(tokens: int) -> str:
+    return (
+        f"Team Payments has used {tokens} of 1000 tokens in the 3600-second window"
+        " ending 2026-10-04T02:00:00+00:00."
+    )
+
+
 def snapshot(*policies: Policy, version: int = 7) -> PolicySnapshot:
     return PolicySnapshot(version=version, policies=list(policies))
 
 
-def prompt(*policies: Policy, texts: list[str], model: str = "corporate-a"):
-    return evaluate_prompt(snapshot(*policies), IDENTITY, model, texts)
+def prompt(*policies: Policy, texts: list[str], model: str = "corporate-a", usage: dict | None = None):
+    return evaluate_prompt(snapshot(*policies), IDENTITY, model, texts, usage or {})
 
 
 def response(*policies: Policy, texts: list[str]):
@@ -74,7 +93,7 @@ def test_authority_violation_names_team_and_model():
 
 
 def test_no_policies_is_allowed_with_the_version():
-    decision = evaluate_prompt(snapshot(version=3), IDENTITY, "corporate-b", ["Hello"])
+    decision = evaluate_prompt(snapshot(version=3), IDENTITY, "corporate-b", ["Hello"], {})
     assert (decision.outcome, decision.policy_version, decision.policy_results) == ("allowed", 3, [])
 
 
@@ -95,16 +114,82 @@ def test_each_authority_policy_gives_one_result_in_order():
     assert [entry.code for entry in decision.policy_results] == ["AUTH-A", "AUTH-B"]
 
 
-def test_limit_and_ai_policies_add_no_results_yet():
-    others = (
-        policy("AI-X", kind=None, applies_to="both"),
-        policy("LIM-X", kind="limit", params={"max_tokens": 1, "window_seconds": 60, "team": None}),
-    )
-    allowed = prompt(*others, texts=["x"], model="corporate-b")
+def test_ai_policies_add_no_results_yet():
+    ai = policy("AI-X", kind=None, applies_to="both")
+    allowed = prompt(ai, texts=["x"], model="corporate-b")
     assert (allowed.outcome, allowed.policy_results) == ("allowed", [])
-    blocked = prompt(*others, policy("AUTH-MODEL"), texts=["x"], model="corporate-b")
+    blocked = prompt(ai, policy("AUTH-MODEL"), texts=["x"], model="corporate-b")
     assert blocked.outcome == "blocked"
     assert [entry.code for entry in blocked.policy_results] == ["AUTH-MODEL"]
+
+
+def test_limit_passes_below_max_tokens():
+    decision = prompt(limit("LIM-X"), texts=["Hello"], usage=used(999))
+    assert decision.outcome == "allowed"
+    [result] = decision.policy_results
+    assert (result.code, result.kind, result.ai, result.action) == ("LIM-X", "limit", False, "block")
+    assert (result.result, result.reasoning) == ("pass", None)
+
+
+@pytest.mark.parametrize("tokens", [1000, 1204])
+def test_limit_is_violated_at_or_over_max_tokens(tokens):
+    decision = prompt(limit("LIM-X"), texts=["Hello"], usage=used(tokens))
+    assert decision.outcome == "blocked"
+    [result] = decision.policy_results
+    assert (result.result, result.reasoning) == ("violated", limit_reason(tokens))
+
+
+def test_a_team_limit_applies_to_its_team_and_a_null_team_to_every_team():
+    policies = (limit("LIM-ALL", team=None), limit("LIM-OTHER", team="Research"), limit("LIM-OWN"))
+    decision = prompt(*policies, texts=["Hello"], usage=used(5))
+    assert [entry.code for entry in decision.policy_results] == ["LIM-ALL", "LIM-OWN"]
+
+
+def test_each_limit_reads_its_own_window():
+    usage = {60: WindowUsage(used=50, ends=WINDOW_END), 3600: WindowUsage(used=900, ends=WINDOW_END)}
+    policies = (limit("LIM-HOUR", max_tokens=800), limit("LIM-MINUTE", max_tokens=100, window_seconds=60))
+    decision = prompt(*policies, texts=["Hello"], usage=usage)
+    assert [(entry.code, entry.result) for entry in decision.policy_results] == [
+        ("LIM-HOUR", "violated"),
+        ("LIM-MINUTE", "pass"),
+    ]
+
+
+def test_a_limit_block_yields_no_regex_results():
+    decision = prompt(limit("LIM-X"), regex("RGX-X", "x"), texts=["x"], usage=used(1000))
+    assert decision.outcome == "blocked"
+    assert [entry.code for entry in decision.policy_results] == ["LIM-X"]
+
+
+@pytest.mark.parametrize("usage", [{}, used(0, window_seconds=60)], ids=["none", "other-window"])
+def test_a_limit_without_loaded_usage_raises_instead_of_passing(usage):
+    with pytest.raises(KeyError):
+        prompt(limit("LIM-X"), texts=["Hello"], usage=usage)
+
+
+def test_a_limit_only_block_is_429_limit_exceeded():
+    error = blocked_error(prompt(limit("LIM-X"), texts=["Hello"], usage=used(1204)))
+    assert (error.status_code, error.code, error.headers) == (429, "limit_exceeded", None)
+    assert error.message == f"Blocked by LIM-X: {limit_reason(1204)}"
+    assert error.extra == {
+        "policies": [{"code": "LIM-X", "kind": "limit", "reasoning": limit_reason(1204)}],
+        "policy_version": 7,
+    }
+
+
+def test_an_authority_and_limit_block_stays_403_naming_both():
+    policies = (policy("AUTH-MODEL"), limit("LIM-X"))
+    error = blocked_error(prompt(*policies, texts=["Hello"], model="corporate-b", usage=used(1204)))
+    assert (error.status_code, error.code) == (403, "policy_blocked")
+    assert [entry["code"] for entry in error.extra["policies"]] == ["AUTH-MODEL", "LIM-X"]
+    assert error.extra["policy_version"] == 7
+
+
+def test_limit_reasoning_and_error_hold_no_prompt_text():
+    decision = prompt(limit("LIM-X"), texts=["my AKIASECRET"], usage=used(1204))
+    error = blocked_error(decision)
+    assert "AKIASECRET" not in decision.model_dump_json()
+    assert "AKIASECRET" not in error.message + json.dumps(error.extra)
 
 
 def test_rewritten_is_null_and_latency_is_non_negative():
@@ -181,6 +266,12 @@ def test_results_come_authority_first_then_regex_in_code_order():
     assert [entry.code for entry in decision.policy_results] == ["AUTH-MODEL", "A-RGX", "B-RGX"]
 
 
+def test_limit_results_come_after_authority_and_before_regex():
+    policies = (regex("A-RGX", "q"), policy("AUTH-MODEL"), limit("LIM-X"), regex("Z-RGX", "q"))
+    decision = prompt(*policies, texts=["text"], usage=used(0))
+    assert [entry.code for entry in decision.policy_results] == ["AUTH-MODEL", "LIM-X", "A-RGX", "Z-RGX"]
+
+
 def test_violation_reasoning_and_error_hold_no_prompt_text():
     decision = prompt(regex("RGX-KEY", r"AKIA\w+"), texts=["my AKIASECRET"])
     error = blocked_error(decision)
@@ -227,6 +318,7 @@ def test_luhn_valid(digits, valid):
 def test_response_checks_only_response_and_both_regex_policies():
     policies = (
         policy("AUTH-MODEL"),
+        limit("LIM-X", max_tokens=1),
         regex("RGX-ANSWER", "x", applies_to="response"),
         regex("RGX-ASK", "x", applies_to="prompt"),
         regex("RGX-EITHER", "x", applies_to="both"),
@@ -265,7 +357,7 @@ def test_clean_response_is_allowed():
 
 def test_blocked_error_names_every_violated_block_policy():
     decision = evaluate_prompt(
-        snapshot(policy("AUTH-A"), policy("AUTH-B"), version=4), IDENTITY, "corporate-b", ["Hello"]
+        snapshot(policy("AUTH-A"), policy("AUTH-B"), version=4), IDENTITY, "corporate-b", ["Hello"], {}
     )
     error = blocked_error(decision)
     reason = "Team Payments is not authorized for corporate-b."

@@ -154,6 +154,46 @@ such as `(a+)+`.
 | `RGX-PRIVATE-KEY` | PEM, OpenSSH and PGP private keys | block | both |
 | `RGX-EXFIL-IMAGE` | markdown images whose URL carries a query string | block | response |
 
+## Limit policies
+
+A limit policy caps the tokens a team may use in a time window:
+
+```bash
+curl -s localhost:8080/admin/policies -H "$ADMIN" -H 'content-type: application/json' \
+  -d '{"code": "LIM-PAYMENTS", "ai": false, "kind": "limit",
+       "params": {"max_tokens": 20000, "window_seconds": 3600, "team": "payments"},
+       "action": "block", "enabled": true}'
+```
+
+- **Who it applies to.** `team` names one team. `null` applies to every team,
+  each against its own usage. Every limit that applies is checked, so the
+  strictest one decides.
+- **The window.** Windows are fixed and aligned to multiples of `window_seconds`
+  since the Unix epoch (UTC): `3600` is the clock hour and `86400` the UTC day.
+  The database clock decides, so every gateway replica sees the same windows.
+- **What counts.** When the corporate LLM answers, the prompt and answer tokens it
+  reports are added to the caller's team, one row per request in the
+  `token_usage` table. An answer that a response policy then blocks still counts.
+  A failed upstream call and `/check` count nothing.
+- **When it blocks.** A team that has used `max_tokens` or more in the current
+  window is refused before anything is forwarded. A request admitted below the
+  limit is served in full and counted afterwards, so usage can end above
+  `max_tokens`.
+
+Creating, editing or disabling a limit applies from the next request, against the
+usage already counted in its window. A block by limit policies alone answers 429
+`limit_exceeded`; if an authority policy is violated too, the answer is the usual
+403 `policy_blocked`, naming both.
+
+```bash
+curl -s localhost:8080/v1/chat/completions -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"model": "corporate-a", "messages": [{"role": "user", "content": "Hello"}]}'
+# -> 429 {"error": {"code": "limit_exceeded", "message": "Blocked by LIM-PAYMENTS: Team payments has used 20412 of 20000
+#          tokens in the 3600-second window ending 2026-10-04T02:00:00+00:00.", "policies": [{"code": "LIM-PAYMENTS",
+#          "kind": "limit", "reasoning": "..."}], "policy_version": 4}}
+```
+
 ## Check a prompt
 
 `POST /check` runs a prompt through the policy pipeline as the token's employee
@@ -174,4 +214,5 @@ curl -s localhost:8080/check -H "Authorization: Bearer $TOKEN" \
 #      "rewritten": null}
 ```
 
-An authority block stops the pipeline, so the first answer has no regex results.
+An authority or limit block stops the pipeline, so the first answer has no regex
+results. `/check` reports limit policies but never counts tokens.
