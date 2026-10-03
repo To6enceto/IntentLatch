@@ -1,0 +1,16 @@
+prometheus:
+  prometheusSpec:
+    retentionSize: 768MB
+    resources:
+      requests: {cpu: 100m, memory: 384Mi}
+      limits: {cpu: 500m, memory: 768Mi}
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          resources:
+            requests: {storage: 1Gi}
+grafana:
+  persistence:
+    storageClassName: local-path
+    size: 512Mi

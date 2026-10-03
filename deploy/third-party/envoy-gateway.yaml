@@ -1,0 +1,20 @@
+deployment:
+  replicas: 1
+  envoyGateway:
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+  pod:
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - {key: intentlatch.io/role, operator: NotIn, values: [ollama]}
+service:
+  type: ClusterIP
+certgen:
+  job:
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {cpu: 100m, memory: 64Mi}

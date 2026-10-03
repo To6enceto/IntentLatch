@@ -1,0 +1,10 @@
+{
+  "image": "ghcr.io/antonstwork/intentlatch-gateway",
+  "tag": "b1b0289e9412484816bb473e38eb73a3b4ccc7c7",
+  "digest": "sha256:387caa78618bbbec3390695e9896554c3084e129112c96c85106e221c585e01d",
+  "platform": "linux/amd64",
+  "sourceCommit": "b1b0289e9412484816bb473e38eb73a3b4ccc7c7",
+  "baseImage": "python:3.12.15-slim-bookworm",
+  "baseDigest": "sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3",
+  "publishedDate": "2026-10-03"
+}

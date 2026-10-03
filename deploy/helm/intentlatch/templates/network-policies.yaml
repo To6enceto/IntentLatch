@@ -1,0 +1,200 @@
+{{- if .Values.networkPolicies.enabled }}
+{{- range $ns := list "intentlatch-system" "intentlatch-data" "agents" "upstreams" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ $ns }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: {{ $ns }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway
+  namespace: intentlatch-system
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: intentlatch-gateway}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: envoy-gateway-system}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: agents}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: open-webui}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: observability}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: prometheus}
+      ports: [{protocol: TCP, port: 8080}]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: intentlatch-data}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: postgres}
+      ports: [{protocol: TCP, port: 5432}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: intentlatch-data}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: valkey}
+      ports: [{protocol: TCP, port: 6379}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: upstreams}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: ollama}
+      ports: [{protocol: TCP, port: 11434}]
+{{- range $name, $port := dict "postgres" 5432 "valkey" 6379 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: intentlatch-data
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: {{ $name }}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: intentlatch-system}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: intentlatch-gateway}
+      ports: [{protocol: TCP, port: {{ $port }}}]
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: open-webui
+  namespace: agents
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: open-webui}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: envoy-gateway-system}
+      ports: [{protocol: TCP, port: 8080}]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: intentlatch-system}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: intentlatch-gateway}
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ollama
+  namespace: upstreams
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: ollama}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: intentlatch-system}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: intentlatch-gateway}
+      ports: [{protocol: TCP, port: 11434}]
+{{- if .Values.ollama.pull.enabled }}
+---
+# Temporary maintenance exception, removed by make models even on failure.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ollama-pull-ingress
+  namespace: upstreams
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: ollama}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: ollama-pull}
+      ports: [{protocol: TCP, port: 11434}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ollama-pull-egress
+  namespace: upstreams
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: ollama-pull}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: ollama}
+      ports: [{protocol: TCP, port: 11434}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ollama-download
+  namespace: upstreams
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: ollama}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8, 100.64.0.0/10]
+      ports: [{protocol: TCP, port: 443}]
+{{- end }}
+---
+# Observability has no blanket egress deny: its controllers need the API server.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grafana-ingress
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: grafana}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: envoy-gateway-system}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: observability}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: prometheus}
+      ports: [{protocol: TCP, port: 3000}]
+{{- end }}

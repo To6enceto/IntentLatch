@@ -1,0 +1,34 @@
+crds:
+  enabled: true
+config:
+  apiVersion: controller.config.cert-manager.io/v1alpha1
+  kind: ControllerConfiguration
+  enableGatewayAPI: true
+extraArgs:
+  - --acme-http01-solver-resource-request-cpu=10m
+  - --acme-http01-solver-resource-request-memory=16Mi
+  - --acme-http01-solver-resource-limits-cpu=100m
+  - --acme-http01-solver-resource-limits-memory=32Mi
+resources:
+  requests: {cpu: 25m, memory: 64Mi}
+  limits: {cpu: 200m, memory: 128Mi}
+affinity: &general
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - {key: intentlatch.io/role, operator: NotIn, values: [ollama]}
+webhook:
+  resources:
+    requests: {cpu: 25m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 64Mi}
+  affinity: *general
+cainjector:
+  resources:
+    requests: {cpu: 25m, memory: 64Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+  affinity: *general
+startupapicheck:
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 64Mi}
