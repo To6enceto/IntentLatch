@@ -49,6 +49,10 @@ and installed dependencies before adding machinery.
 - Model endpoints require an employee token (`Authorization: Bearer`); admin
   endpoints under `/admin` require the admin API key. Authority comes from the
   database, never from token claims or a request body.
+- `POST /authority` reports what a token may do (`valid`, employee, team,
+  authorized models). An invalid token reveals only `valid: false` and a reason.
+- Gateway-owned APIs live at the root (`/admin`, `/authority`, `/healthz`), not
+  under `/v1` (OpenAI's namespace) or `/api` (Ollama's).
 - Never log, echo or store an employee token, the signing key or the admin key.
 - Never log or store raw identity tokens or raw sensitive values. Mask regex
   matches before writing decision records.
