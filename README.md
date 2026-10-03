@@ -7,6 +7,56 @@ live. Built for the HackYeah 2026 "AI Control Layer" challenge.
 ## Layout
 
 - `gateway/` - the control gateway (Python, FastAPI)
+- `console/` - the standalone management console shell (React, Vite, TypeScript)
+
+## Run the console locally
+
+Use Node 22.22+ and npm. From the repository root:
+
+```bash
+npm --prefix console ci
+npm --prefix console run dev -- --host 127.0.0.1
+```
+
+Open the local URL printed by Vite, normally `http://127.0.0.1:5173`.
+The frontend runs independently of the gateway, its `.env`, and the cluster.
+Geist fonts load from Google Fonts, with system font fallbacks when unavailable.
+
+```bash
+npm --prefix console run typecheck
+npm --prefix console run build
+```
+
+The production files are written to `console/dist/`. Future hosting must serve
+`index.html` for console routes to support direct links and reloads.
+
+| Route | Page |
+| --- | --- |
+| `/` | Redirects to Metrics |
+| `/metrics` | Metrics |
+| `/teams` | Teams & identities |
+| `/policies` | Policies |
+| `/tests` | Test cases |
+| `/reports` | Reports |
+| `/login` | Standalone login presentation |
+
+The five management pages contain placeholders for later features. Unknown
+routes show a not-found page with a link to Metrics. The sidebar can collapse,
+and the theme control stores only `intentlatch.theme` (`dark` or `light`) in
+localStorage. Missing, invalid or blocked storage defaults to dark.
+
+This is feature 14a: the frontend shell. Authentication, sessions, accounts and
+server-enforced roles are deferred to 14b. The login form checks a nonblank
+username and a nonempty password, then announces "Sign-in is unavailable."
+It stays on `/login`; credentials are neither submitted nor persisted by the
+application. The console has no trusted current user or gateway connection yet.
+
+For a visual review, open Metrics and Login at 1440x900 and 1280x900 in each
+theme. Visit all five links, reload a direct route, and use browser Back/Forward.
+Use Tab to reach the skip link, navigation, collapse and theme controls. On
+Login, submit empty fields, a whitespace-only username, and then nonempty
+fields; check focus, feedback and the password visibility control. Leave and
+return to confirm the form is empty. Reload to check theme persistence.
 
 ## Run the gateway locally
 
