@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .. import pipeline, upstream
+from .. import limits, pipeline, upstream
 from ..auth import require_identity
 from ..chat import ChatRequest, allowlisted, message_texts, prompt_texts
 
@@ -57,6 +57,8 @@ async def chat(body: OllamaChatRequest, request: Request) -> Response:
             payload["options"] = kept
     payload |= {"model": tag, "stream": False}
     reply = await upstream.request_json(request.app.state.ollama, "POST", "/api/chat", json=payload)
+    # Counted before response policies run: a blocked answer still spent its tokens.
+    await limits.record_usage(request.app.state.pool, request.state.identity.team_id, reply_usage(reply))
     pipeline.enforce_response_policies(request, snapshot, reply_texts(reply))
     reply["model"] = body.model
     if not body.stream:
@@ -66,6 +68,10 @@ async def chat(body: OllamaChatRequest, request: Request) -> Response:
 
 def reply_texts(reply: dict[str, Any]) -> list[str]:
     return message_texts(reply.get("message"))
+
+
+def reply_usage(reply: dict[str, Any]) -> int:
+    return limits.reported(reply.get("prompt_eval_count")) + limits.reported(reply.get("eval_count"))
 
 
 def replay_as_ndjson(reply: dict[str, Any]) -> list[str]:

@@ -6,11 +6,13 @@ from typing import Literal
 from fastapi import Request
 from pydantic import BaseModel
 
-from . import policies
+from . import limits, policies
 from .errors import GatewayError
 from .identity import Identity
+from .limits import WindowUsage
 from .normalize import normalized_views
 from .policies import Action, Kind, Policy, PolicySnapshot
+from .teams import iso
 
 log = logging.getLogger("intentlatch")
 
@@ -53,6 +55,38 @@ def authority_result(policy: Policy, identity: Identity, model: str) -> PolicyRe
         action=policy.action,
         result="pass" if authorized else "violated",
         reasoning=None if authorized else f"Team {identity.team_name} is not authorized for {model}.",
+        latency_ms=elapsed_ms(started),
+    )
+
+
+def team_limits(snapshot: PolicySnapshot, identity: Identity) -> list[Policy]:
+    # A null team means every team, each against its own usage.
+    return [
+        policy
+        for policy in snapshot.policies
+        if policy.kind == "limit" and policy.params["team"] in (None, identity.team_name)
+    ]
+
+
+def limit_result(policy: Policy, identity: Identity, usage: dict[int, WindowUsage]) -> PolicyResult:
+    started = time.perf_counter()
+    max_tokens = policy.params["max_tokens"]
+    window_seconds = policy.params["window_seconds"]
+    # Usage never loaded for this window is a bug: the KeyError fails the request, never passes it.
+    window = usage[window_seconds]
+    violated = window.used >= max_tokens
+    return PolicyResult(
+        code=policy.code,
+        kind=policy.kind,
+        ai=policy.ai,
+        action=policy.action,
+        result="violated" if violated else "pass",
+        reasoning=(
+            f"Team {identity.team_name} has used {window.used} of {max_tokens} tokens"
+            f" in the {window_seconds}-second window ending {iso(window.ends)}."
+            if violated
+            else None
+        ),
         latency_ms=elapsed_ms(started),
     )
 
@@ -126,15 +160,20 @@ def decide(results: list[PolicyResult], version: int) -> Decision:
 
 
 def evaluate_prompt(
-    snapshot: PolicySnapshot, identity: Identity, model: str, texts: list[str]
+    snapshot: PolicySnapshot,
+    identity: Identity,
+    model: str,
+    texts: list[str],
+    usage: dict[int, WindowUsage],
 ) -> Decision:
-    # Authority runs first (limit policies join it in item 8), then regex; the control
-    # agent (item 9) follows. A stage that violates a block policy stops the pipeline.
+    # Authority and limit policies form the first stage, then regex; the control agent
+    # (item 9) follows. A stage that violates a block policy stops the pipeline.
     results = [
         authority_result(policy, identity, model)
         for policy in snapshot.policies
         if policy.kind == "authority"
     ]
+    results += [limit_result(policy, identity, usage) for policy in team_limits(snapshot, identity)]
     if not blocking(results):
         results += regex_results(snapshot, texts, "prompt")
     return decide(results, snapshot.version)
@@ -147,9 +186,11 @@ def evaluate_response(snapshot: PolicySnapshot, texts: list[str]) -> Decision:
 
 def blocked_error(decision: Decision) -> GatewayError:
     blocked = responsible(decision.policy_results)
+    # A block by limits alone lifts when their windows end, so it is 429; any other block is final.
+    limited = all(entry.kind == "limit" for entry in blocked)
     return GatewayError(
-        403,
-        "policy_blocked",
+        429 if limited else 403,
+        "limit_exceeded" if limited else "policy_blocked",
         "Blocked by " + "; ".join(f"{entry.code}: {entry.reasoning}" for entry in blocked),
         extra={
             "policies": [
@@ -173,17 +214,28 @@ def enforce(request: Request, decision: Decision, direction: Direction) -> None:
         raise blocked_error(decision)
 
 
+async def prompt_decision(
+    request: Request, model: str, texts: list[str]
+) -> tuple[PolicySnapshot, Decision]:
+    pool = request.app.state.pool
+    identity = request.state.identity
+    snapshot = await policies.load_snapshot(pool)
+    windows = {policy.params["window_seconds"] for policy in team_limits(snapshot, identity)}
+    usage = await limits.load_usage(pool, identity.team_id, windows)
+    return snapshot, evaluate_prompt(snapshot, identity, model, texts, usage)
+
+
 async def decide_prompt(request: Request, model: str, texts: list[str]) -> Decision:
-    snapshot = await policies.load_snapshot(request.app.state.pool)
-    return evaluate_prompt(snapshot, request.state.identity, model, texts)
+    _, decision = await prompt_decision(request, model, texts)
+    return decision
 
 
 async def enforce_prompt_policies(
     request: Request, model: str, texts: list[str]
 ) -> PolicySnapshot:
     # Returns the snapshot so the response is checked against the same policy version.
-    snapshot = await policies.load_snapshot(request.app.state.pool)
-    enforce(request, evaluate_prompt(snapshot, request.state.identity, model, texts), "prompt")
+    snapshot, decision = await prompt_decision(request, model, texts)
+    enforce(request, decision, "prompt")
     return snapshot
 
 

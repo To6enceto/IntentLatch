@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .. import pipeline, upstream
+from .. import limits, pipeline, upstream
 from ..auth import require_identity
 from ..chat import ChatRequest, allowlisted, message_texts, prompt_texts
 
@@ -53,6 +53,10 @@ async def chat_completions(body: OpenAIChatRequest, request: Request) -> Respons
     completion = await upstream.request_json(
         request.app.state.ollama, "POST", "/v1/chat/completions", json=payload
     )
+    # Counted before response policies run: a blocked answer still spent its tokens.
+    await limits.record_usage(
+        request.app.state.pool, request.state.identity.team_id, completion_usage(completion)
+    )
     pipeline.enforce_response_policies(request, snapshot, completion_texts(completion))
     completion["model"] = body.model
     if not body.stream:
@@ -74,6 +78,13 @@ def completion_texts(completion: dict[str, Any]) -> list[str]:
         if isinstance(choice, dict)
         for text in message_texts(choice.get("message"))
     ]
+
+
+def completion_usage(completion: dict[str, Any]) -> int:
+    usage = completion.get("usage")
+    if not isinstance(usage, dict):
+        return 0
+    return limits.reported(usage.get("prompt_tokens")) + limits.reported(usage.get("completion_tokens"))
 
 
 def replay_as_sse(completion: dict[str, Any], include_usage: bool) -> list[str]:
