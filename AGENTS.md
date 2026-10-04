@@ -19,7 +19,7 @@ challenge.
 ## Repository layout
 
 - `gateway/` - the control gateway, Python package `intentlatch` (src layout)
-- `console/` - the management console, React + Vite + TypeScript (not created yet)
+- `console/` - the management console shell, React + Vite + TypeScript
 - `deploy/` - Helm chart and cluster setup (not created yet)
 
 ## Proportional engineering
@@ -79,6 +79,11 @@ Run from the repository root unless noted.
 - Health: `curl -s localhost:8080/healthz`
 - Test: `.venv/bin/pytest gateway` (pytest; tests live in `gateway/tests/`,
   named `test_<module>.py`). This is the test gate for logic-bearing changes.
+- Console setup (Node 22.22+): `npm --prefix console ci`
+- Console dev server: `npm --prefix console run dev -- --host 127.0.0.1`
+  (standalone frontend; no gateway or cluster credentials required).
+- Console typecheck: `npm --prefix console run typecheck`
+- Console build: `npm --prefix console run build`
 - Lint: none configured.
 - Policy test cases: `intentlatch test run` is planned with the test runner and
   is not available yet. This is a product feature, separate from the project's
