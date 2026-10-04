@@ -3,7 +3,7 @@ import time
 
 from fastapi import Request
 
-from . import teams
+from . import metrics, teams
 from .errors import GatewayError
 from .identity import Identity, TokenError, bearer_token, match_identity, verify_token
 
@@ -12,6 +12,7 @@ TOKEN_MESSAGES = {
     "token_invalid": "The employee token is not valid.",
     "token_revoked": "The employee token has been revoked or replaced.",
 }
+AUTH_FAILURE_REASONS = {"token_missing": "missing", "token_invalid": "invalid", "token_revoked": "revoked"}
 
 
 def challenge(code: str) -> dict[str, str]:
@@ -43,6 +44,7 @@ async def require_identity(request: Request) -> Identity:
         record = await teams.load_identity(request.app.state.pool, claims.employee_id)
         identity = match_identity(claims, record)
     except TokenError as exc:
+        metrics.AUTH_FAILURES.labels(AUTH_FAILURE_REASONS[exc.code]).inc()
         raise GatewayError(401, exc.code, TOKEN_MESSAGES[exc.code], headers=challenge(exc.code)) from exc
     request.state.identity = identity
     request.state.auth_ms = round((time.perf_counter() - started) * 1000, 3)

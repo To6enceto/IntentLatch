@@ -31,5 +31,6 @@ class Trace:
     response: Stage | None = None
     upstream_ms: float = 0.0
     upstream_seconds: float = 0.0
+    upstream_error: str | None = None
     tokens_in: int = 0
     tokens_out: int = 0

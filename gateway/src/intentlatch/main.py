@@ -7,10 +7,11 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Response
 
-from . import db, decision_log, policies
+from . import db, decision_log, metrics, policies
 from .errors import GatewayError, error_response, install_error_handlers
 from .llms import CorporateLlms
 from .routes import admin, authority, check, health, ollama, openai
+from .routes import metrics as metrics_route
 from .settings import load_settings
 
 CONNECT_TIMEOUT_SECONDS = 5
@@ -28,12 +29,13 @@ def configure_logging() -> None:
     log.propagate = False
 
 
-async def log_decisions(request: Request, response: Response, started: float) -> Response:
+async def record_request(request: Request, response: Response, started: float) -> Response:
     # The trace is complete here: the endpoint has built its response, buffered streams included.
     trace = getattr(request.state, "trace", None)
     if trace is None or trace.prompt is None:
         return response
     total_ms = round((time.perf_counter() - started) * 1000, 3)
+    metrics.observe(trace, total_ms)
     try:
         await decision_log.write(request.app.state.pool, trace, total_ms)
     except GatewayError as exc:
@@ -96,7 +98,7 @@ def create_app(
         except Exception:
             log.exception("unhandled error request_id=%s", request_id)
             response = error_response(500, "internal_error", "Internal error.")
-        response = await log_decisions(request, response, started)
+        response = await record_request(request, response, started)
         response.headers["X-Request-ID"] = request_id
         log.info(
             "%s %s %d %.1fms request_id=%s",
@@ -114,6 +116,7 @@ def create_app(
     app.include_router(admin.router)
     app.include_router(authority.router)
     app.include_router(check.router)
+    app.include_router(metrics_route.router)
     return app
 
 

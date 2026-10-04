@@ -313,6 +313,42 @@ docker exec intentlatch-pg psql -U intentlatch -c \
   "SELECT seq, direction, outcome, control_agent_status, source_masked FROM decision_records ORDER BY seq DESC LIMIT 5"
 ```
 
+## Metrics
+
+`GET /metrics` serves the Prometheus text format and needs no token. Label values
+are only team names, models, policy codes, kinds, outcomes, directions, stages and
+reasons: never employees, prompts, tokens or free text. Each chat request is
+counted when it ends, from the same trace the decision log writes.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `intentlatch_requests_total` | counter | team, model, outcome |
+| `intentlatch_policy_enforcements_total` | counter | policy_code, kind, action, outcome, direction, team, model |
+| `intentlatch_policy_checks_total` | counter | policy_code, kind, result |
+| `intentlatch_policy_check_duration_seconds` | histogram | kind |
+| `intentlatch_request_duration_seconds` | histogram | stage (auth, non_ai, control_agent, upstream, total) |
+| `intentlatch_tokens_total` | counter | team, model, direction |
+| `intentlatch_compute_seconds_total` | counter | team, model |
+| `intentlatch_team_token_usage_ratio` | gauge | team |
+| `intentlatch_auth_failures_total` | counter | reason (missing, invalid, revoked, model_not_authorized) |
+| `intentlatch_upstream_errors_total` | counter | model, reason |
+| `intentlatch_control_agent_verdicts_total` | counter | direction, status |
+| `intentlatch_control_agent_errors_total` | counter | reason (timeout, unreachable, unparseable, missing_rewrite) |
+| `intentlatch_rewrite_rejections_total` | counter | policy_code |
+| `intentlatch_test_cases_total` | counter | result |
+| `intentlatch_policies_active` | gauge | kind (authority, limit, regex, ai) |
+
+`intentlatch_policy_enforcements_total` counts the policies responsible for each
+blocked or edited prompt or response: for a block, every violated `block` policy,
+plus an `edit` regex policy whose rewrite still matched (`action="edit"`,
+`outcome="blocked"`); for an edit, every violated `edit` policy. The usage ratio
+is the team's strictest limit, set whenever its usage loads. Histogram buckets run
+from 5 ms to 120 s. The test runner fills `intentlatch_test_cases_total`.
+
+```bash
+curl -s localhost:8080/metrics | grep '^intentlatch_requests_total'
+```
+
 ## Check a prompt
 
 `POST /check` runs a prompt through the policy pipeline as the token's employee

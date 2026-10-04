@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import Request
 from pydantic import BaseModel, Field
 
-from . import control_agent, limits, policies
+from . import control_agent, limits, metrics, policies
 from .chat import Piece
 from .control_agent import FAILURE_TEXT, AgentFailure, FailureReason, Verdict
 from .errors import GatewayError
@@ -269,7 +269,7 @@ def conclude(
         # Fail closed in production; development lets the text through unchanged.
         return Decision(
             outcome="blocked" if production else "allowed", policy_version=version, policy_results=results,
-            control_agent_status="error", agent_failure=failure if production else None,
+            control_agent_status="error", agent_failure=failure,
         )
     if not edits:
         return Decision(outcome="allowed", policy_version=version, policy_results=results, control_agent_status=status)
@@ -457,11 +457,13 @@ async def prompt_decision(
     pool = request.app.state.pool
     identity = request.state.identity
     snapshot = await policies.load_snapshot(pool)
+    metrics.set_active_policies(snapshot)
     trace = getattr(request.state, "trace", None)
     if trace is not None:
         trace.snapshot = snapshot
-    windows = {policy.params["window_seconds"] for policy in team_limits(snapshot, identity)}
-    usage = await limits.load_usage(pool, identity.team_id, windows)
+    applying = team_limits(snapshot, identity)
+    usage = await limits.load_usage(pool, identity.team_id, {policy.params["window_seconds"] for policy in applying})
+    metrics.set_usage_ratio(identity.team_name, applying, usage)
     results = first_stages(snapshot, identity, model, [piece.text for piece in pieces], usage)
     return snapshot, await judged(request, snapshot, results, pieces, "prompt", elapsed_ms(started))
 

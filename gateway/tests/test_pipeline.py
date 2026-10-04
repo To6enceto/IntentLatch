@@ -377,7 +377,7 @@ def test_an_agent_failure_lets_the_text_through_in_development():
         ai("AI-X"), regex("RGX-MAIL", MAIL, action="edit"), texts=["jan@firma.pl"], failure="timeout", production=False
     )
     assert (decision.outcome, decision.control_agent_status) == ("allowed", "error")
-    assert (decision.rewrites, decision.agent_failure, decision.responsible) == (None, None, [])
+    assert (decision.rewrites, decision.agent_failure, decision.responsible) == (None, "timeout", [])
     assert [entry.result for entry in decision.policy_results] == ["violated", "error"]
 
 

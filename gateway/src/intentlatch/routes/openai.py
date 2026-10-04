@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .. import decision_log, limits, pipeline, upstream
 from ..auth import require_identity
 from ..chat import ChatRequest, Piece, allowlisted, apply_rewrites, message_pieces, prompt_pieces, rewrite_message
+from ..errors import GatewayError
 
 router = APIRouter(dependencies=[Depends(require_identity)])
 
@@ -55,9 +56,13 @@ async def chat_completions(body: OpenAIChatRequest, request: Request) -> Respons
         data["messages"] = apply_rewrites(data["messages"], decision.rewrites)
     payload = allowlisted(data, FORWARDED_FIELDS) | {"model": tag, "stream": False}
     started = time.perf_counter()
-    completion = await upstream.request_json(
-        request.app.state.ollama, "POST", "/v1/chat/completions", json=payload
-    )
+    try:
+        completion = await upstream.request_json(
+            request.app.state.ollama, "POST", "/v1/chat/completions", json=payload
+        )
+    except GatewayError as exc:
+        trace.upstream_error = exc.code
+        raise
     trace.upstream_ms = pipeline.elapsed_ms(started)
     # Ollama's OpenAI-compatible endpoint reports no durations, so wall-clock time stands in.
     trace.upstream_seconds = trace.upstream_ms / 1000

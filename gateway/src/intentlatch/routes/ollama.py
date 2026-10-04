@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .. import decision_log, limits, pipeline, upstream
 from ..auth import require_identity
 from ..chat import ChatRequest, Piece, allowlisted, apply_rewrites, message_pieces, prompt_pieces, rewrite_message
+from ..errors import GatewayError
 
 router = APIRouter(dependencies=[Depends(require_identity)])
 
@@ -61,7 +62,11 @@ async def chat(body: OllamaChatRequest, request: Request) -> Response:
             payload["options"] = kept
     payload |= {"model": tag, "stream": False}
     started = time.perf_counter()
-    reply = await upstream.request_json(request.app.state.ollama, "POST", "/api/chat", json=payload)
+    try:
+        reply = await upstream.request_json(request.app.state.ollama, "POST", "/api/chat", json=payload)
+    except GatewayError as exc:
+        trace.upstream_error = exc.code
+        raise
     trace.upstream_ms = pipeline.elapsed_ms(started)
     trace.upstream_seconds = upstream.eval_seconds(reply)
     trace.tokens_in, trace.tokens_out = reply_counts(reply)
