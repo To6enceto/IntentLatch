@@ -1,10 +1,12 @@
 import uuid
-from typing import Any
+from datetime import datetime
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import AwareDatetime
 
-from .. import policies, runner, teams, testcases
+from .. import policies, reports, runner, teams, testcases
 from ..auth import require_admin
 from ..policies import PolicyCreate, PolicyUpdate
 from ..runner import RunRequest
@@ -15,9 +17,27 @@ router = APIRouter(prefix="/admin", dependencies=[Depends(require_admin)])
 
 NO_STORE = {"Cache-Control": "no-store"}
 
+From = Annotated[AwareDatetime, Query(alias="from")]
+To = Annotated[AwareDatetime, Query(alias="to")]
+
 
 def signing_key(request: Request) -> str:
     return request.app.state.settings.token_signing_key.get_secret_value()
+
+
+async def report_items(
+    request: Request, start: datetime, end: datetime
+) -> tuple[datetime, datetime, list[dict[str, Any]]]:
+    start, end = reports.report_range(start, end)
+    return start, end, await reports.load_items(request.app.state.pool, start, end)
+
+
+def csv_download(text: str, name: str) -> Response:
+    return Response(
+        text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"', **NO_STORE},
+    )
 
 
 @router.post("/teams", status_code=201)
@@ -107,3 +127,21 @@ async def list_test_runs(request: Request) -> dict[str, Any]:
 @router.get("/test-runs/{run_id}")
 async def get_test_run(run_id: uuid.UUID, request: Request) -> dict[str, Any]:
     return {"test_run": await runner.get_run(request.app.state.pool, run_id)}
+
+
+@router.get("/reports")
+async def report(request: Request, start: From, end: To) -> JSONResponse:
+    start, end, items = await report_items(request, start, end)
+    return JSONResponse(reports.build_report(start, end, items), headers=NO_STORE)
+
+
+@router.get("/reports/items.csv")
+async def report_items_csv(request: Request, start: From, end: To) -> Response:
+    start, end, items = await report_items(request, start, end)
+    return csv_download(reports.items_csv(items), reports.filename(start, end, "items"))
+
+
+@router.get("/reports/totals.csv")
+async def report_totals_csv(request: Request, start: From, end: To) -> Response:
+    start, end, items = await report_items(request, start, end)
+    return csv_download(reports.totals_csv(reports.totals(items)), reports.filename(start, end, "totals"))

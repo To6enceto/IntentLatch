@@ -453,3 +453,47 @@ kubectl exec -n intentlatch-system deploy/intentlatch-gateway -- intentlatch tes
 The command ships with the gateway package, so an environment created before it
 needs `.venv/bin/pip install -e "./gateway[test]"` again. It defaults to
 `http://127.0.0.1:8080`, which is the gateway inside its container too.
+
+## Reports
+
+A report lists every edited and blocked prompt and response in a past time
+range, read from the decision log, with the policies that fired and their
+reasoning, plus totals by policy, team and model. Reports need the admin key.
+
+```bash
+RANGE='from=2026-10-04T00:00:00Z&to=2026-10-04T06:00:00Z'
+curl -s "localhost:8080/admin/reports?$RANGE" -H "$ADMIN"
+# -> {"from": "2026-10-04T00:00:00+00:00", "to": "2026-10-04T06:00:00+00:00", "generated_at": "...",
+#     "totals": {"blocked": 3, "edited": 5, "total": 8,
+#                "by_policy": [{"code": "RGX-EMAIL", "blocked": 0, "edited": 4, "total": 4}, ...],
+#                "by_team": [{"team": "payments", ...}, ...], "by_model": [{"model": "corporate-a", ...}, ...]},
+#     "items": [{"ts": "...", "request_id": "...", "direction": "prompt", "outcome": "edited", "team": "payments",
+#                "model": "corporate-a", "employee_id": "...", "employee": "Ana", "control_agent_status": "modified",
+#                "policies": [{"code": "RGX-EMAIL", "kind": "regex", "ai": false, "action": "edit",
+#                              "reasoning": "The prompt matches this policy's pattern."}],
+#                "source_masked": "Write to [RGX-EMAIL]", "rewritten_masked": "Write to [removed]",
+#                "policy_version": 4, "test_run_id": null}, ...]}
+
+curl -sOJ "localhost:8080/admin/reports/items.csv?$RANGE" -H "$ADMIN"    # saves intentlatch-report-...-items.csv
+curl -sOJ "localhost:8080/admin/reports/totals.csv?$RANGE" -H "$ADMIN"   # saves intentlatch-report-...-totals.csv
+```
+
+- **Range.** `from` and `to` are required ISO 8601 times with a timezone; `from`
+  is included and `to` is not. Write UTC as `Z`, since a `+` in a query string
+  reads as a space.
+- **Items.** One per checked prompt or response that was edited or blocked,
+  oldest first. The text is the decision log's masked text, and
+  `rewritten_masked` is the edit. `policies` lists the violated policies; a block
+  caused by a control-agent failure lists none and shows
+  `control_agent_status: "error"`.
+- **Totals** count those items: for each policy the items it fired on, and for
+  each team and model their items, sorted with the most first.
+- **CSV.** `items.csv` has one row per item, with the fired codes separated by
+  spaces and one `CODE: reasoning` line per policy. `totals.csv` has
+  `dimension, key, blocked, edited, total` rows, the `all` row first. Both are
+  UTF-8. A cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return
+  gets a leading `'`, so a spreadsheet shows the prompt text instead of running
+  it as a formula.
+
+Report answers are never cached (`Cache-Control: no-store`), and every matching
+record comes back at once, with no paging.
