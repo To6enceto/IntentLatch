@@ -1,6 +1,6 @@
 import pytest
 
-from intentlatch.chat import message_texts, prompt_texts
+from intentlatch.chat import Piece, apply_rewrites, message_pieces, message_texts, prompt_pieces, prompt_texts
 
 
 def test_string_content_is_one_piece():
@@ -51,6 +51,41 @@ def test_tool_call_arguments_are_pieces_after_the_content():
 )
 def test_junk_shapes_give_no_pieces(message):
     assert message_texts(message) == []
+
+
+def test_content_pieces_are_rewritable_and_tool_call_arguments_are_not():
+    message = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "a"}, {"type": "image_url", "image_url": {"url": "x"}}, {"type": "text", "text": "b"}],
+        "tool_calls": [{"function": {"name": "f", "arguments": '{"q": 1}'}}],
+    }
+    assert message_pieces(message) == [Piece("a", True), Piece("b", True), Piece('{"q": 1}', False)]
+
+
+def test_rewrites_replace_content_in_place_and_keep_tool_call_arguments():
+    call = {"id": "c", "type": "function", "function": {"name": "f", "arguments": '{"q": "secret"}'}}
+    messages = [
+        {"role": "system", "content": "s"},
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "u1"}, {"type": "image_url", "image_url": {"url": "x"}}, {"type": "text", "text": "u2"}],
+        },
+        {"role": "assistant", "content": None, "tool_calls": [call]},
+        {"role": "tool", "content": "t", "tool_call_id": "c"},
+    ]
+    assert len(prompt_pieces(messages)) == 5
+    rewritten = apply_rewrites(messages, ["S", "U1", "U2", "ignored", "T"])
+    assert rewritten == [
+        {"role": "system", "content": "S"},
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "U1"}, {"type": "image_url", "image_url": {"url": "x"}}, {"type": "text", "text": "U2"}],
+        },
+        {"role": "assistant", "content": None, "tool_calls": [call]},
+        {"role": "tool", "content": "T", "tool_call_id": "c"},
+    ]
+    assert messages[0]["content"] == "s"
+    assert prompt_texts(rewritten) == ["S", "U1", "U2", '{"q": "secret"}', "T"]
 
 
 def test_prompt_texts_cover_every_role_in_order():

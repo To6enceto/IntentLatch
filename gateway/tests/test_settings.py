@@ -40,6 +40,33 @@ def test_short_secret_is_rejected_and_named_without_echoing_it(name):
     assert short not in str(raised.value)
 
 
+def test_control_agent_defaults_to_corporate_a_on_the_ollama_url_and_production():
+    settings = load_settings(REQUIRED)
+    assert (settings.control_agent_url, settings.control_agent_model) == ("http://localhost:11434", "qwen2.5:3b")
+    assert settings.environment == "production"
+
+
+def test_control_agent_and_environment_can_be_set():
+    settings = load_settings(
+        REQUIRED
+        | {
+            "INTENTLATCH_CONTROL_AGENT_URL": "http://agent:11434",
+            "INTENTLATCH_CONTROL_AGENT_MODEL": "qwen2.5:7b",
+            "INTENTLATCH_ENVIRONMENT": "development",
+        }
+    )
+    assert (settings.control_agent_url, settings.control_agent_model, settings.environment) == (
+        "http://agent:11434",
+        "qwen2.5:7b",
+        "development",
+    )
+
+
+def test_unknown_environment_is_rejected_and_named():
+    with pytest.raises(SettingsError, match="INTENTLATCH_ENVIRONMENT"):
+        load_settings(REQUIRED | {"INTENTLATCH_ENVIRONMENT": "staging"})
+
+
 def test_secrets_are_hidden_from_repr():
     settings = load_settings(REQUIRED)
     assert SIGNING_KEY not in repr(settings)

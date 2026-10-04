@@ -1,7 +1,8 @@
 import os
 from collections.abc import Mapping
+from typing import Literal, Self
 
-from pydantic import BaseModel, Field, SecretStr, ValidationError
+from pydantic import BaseModel, Field, SecretStr, ValidationError, model_validator
 
 ENV_VARS = {
     "database_url": "INTENTLATCH_DATABASE_URL",
@@ -11,6 +12,9 @@ ENV_VARS = {
     "token_signing_key": "INTENTLATCH_TOKEN_SIGNING_KEY",
     "admin_api_key": "INTENTLATCH_ADMIN_API_KEY",
     "upstream_timeout_seconds": "INTENTLATCH_UPSTREAM_TIMEOUT_SECONDS",
+    "control_agent_url": "INTENTLATCH_CONTROL_AGENT_URL",
+    "control_agent_model": "INTENTLATCH_CONTROL_AGENT_MODEL",
+    "environment": "INTENTLATCH_ENVIRONMENT",
 }
 REQUIRED = (
     "database_url",
@@ -35,6 +39,19 @@ class Settings(BaseModel):
     token_signing_key: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
     admin_api_key: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
     upstream_timeout_seconds: float = Field(default=120, gt=0)
+    control_agent_url: str | None = None
+    control_agent_model: str | None = None
+    # Production is the default, so a missing setting fails closed.
+    environment: Literal["production", "development"] = "production"
+
+    @model_validator(mode="after")
+    def _control_agent_defaults(self) -> Self:
+        # The control agent shares corporate A's model on the same Ollama unless moved.
+        if self.control_agent_url is None:
+            self.control_agent_url = self.ollama_url
+        if self.control_agent_model is None:
+            self.control_agent_model = self.model_a
+        return self
 
 
 def load_settings(environ: Mapping[str, str] = os.environ) -> Settings:

@@ -28,7 +28,10 @@ def configure_logging() -> None:
     log.propagate = False
 
 
-def create_app(ollama_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
+def create_app(
+    ollama_transport: httpx.AsyncBaseTransport | None = None,
+    control_agent_transport: httpx.AsyncBaseTransport | None = None,
+) -> FastAPI:
     configure_logging()
 
     @asynccontextmanager
@@ -41,14 +44,19 @@ def create_app(ollama_transport: httpx.AsyncBaseTransport | None = None) -> Fast
         try:
             seeded = await policies.seed_policies(pool, seeds)
             log.info("policy seeds inserted: %d", seeded)
-            async with httpx.AsyncClient(
-                base_url=settings.ollama_url,
-                timeout=httpx.Timeout(settings.upstream_timeout_seconds, connect=CONNECT_TIMEOUT_SECONDS),
-                transport=ollama_transport,
-            ) as ollama:
+            timeout = httpx.Timeout(settings.upstream_timeout_seconds, connect=CONNECT_TIMEOUT_SECONDS)
+            async with (
+                httpx.AsyncClient(
+                    base_url=settings.ollama_url, timeout=timeout, transport=ollama_transport
+                ) as ollama,
+                httpx.AsyncClient(
+                    base_url=settings.control_agent_url, timeout=timeout, transport=control_agent_transport
+                ) as control_agent,
+            ):
                 app.state.settings = settings
                 app.state.pool = pool
                 app.state.ollama = ollama
+                app.state.control_agent = control_agent
                 app.state.llms = CorporateLlms.from_settings(settings)
                 app.state.started_at = int(time.time())
                 yield

@@ -22,6 +22,12 @@ REGEX_SEEDS = {
     "RGX-EXFIL-IMAGE": ("block", "response"),
 }
 
+AI_SEEDS = {
+    "AI-NO-CREDENTIALS": ("block", "both"),
+    "AI-NO-JAILBREAK": ("block", "prompt"),
+    "AI-NO-COMMITMENTS": ("edit", "response"),
+}
+
 TOKEN_BODY = "a1B2" * 9
 
 MATCHES = {
@@ -101,6 +107,12 @@ def test_regex_seeds_have_their_action_and_direction():
     regex = {code: (seed.action, seed.applies_to) for code, seed in SEEDS.items() if seed.kind == "regex"}
     assert regex == REGEX_SEEDS
     assert all(SEEDS[code].enabled and not SEEDS[code].ai for code in REGEX_SEEDS)
+
+
+def test_ai_seeds_have_their_action_and_direction():
+    seeded = {code: (seed.action, seed.applies_to) for code, seed in SEEDS.items() if seed.ai}
+    assert seeded == AI_SEEDS
+    assert all(SEEDS[code].enabled and SEEDS[code].text for code in AI_SEEDS)
 
 
 @pytest.mark.parametrize(("code", "text"), [(code, text) for code, texts in MATCHES.items() for text in texts])

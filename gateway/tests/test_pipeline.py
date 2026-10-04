@@ -5,14 +5,19 @@ from datetime import UTC, datetime
 
 import pytest
 
+from intentlatch.chat import Piece
+from intentlatch.control_agent import FAILURE_TEXT, Verdict, Violation
 from intentlatch.errors import error_response
 from intentlatch.identity import Identity
 from intentlatch.limits import WindowUsage
 from intentlatch.pipeline import (
+    agent_failed_error,
     authority_result,
     blocked_error,
+    edit_matches,
     evaluate_prompt,
     evaluate_response,
+    first_stages,
     luhn_valid,
     pattern_matches,
 )
@@ -68,12 +73,31 @@ def snapshot(*policies: Policy, version: int = 7) -> PolicySnapshot:
     return PolicySnapshot(version=version, policies=list(policies))
 
 
-def prompt(*policies: Policy, texts: list[str], model: str = "corporate-a", usage: dict | None = None):
-    return evaluate_prompt(snapshot(*policies), IDENTITY, model, texts, usage or {})
+def pieces(texts: list[str]) -> list[Piece]:
+    return [Piece(text, True) for text in texts]
 
 
-def response(*policies: Policy, texts: list[str]):
-    return evaluate_response(snapshot(*policies), texts)
+def prompt(*policies: Policy, texts: list[str], model: str = "corporate-a", usage: dict | None = None, **agent):
+    return evaluate_prompt(snapshot(*policies), IDENTITY, model, pieces(texts), usage or {}, **agent)
+
+
+def response(*policies: Policy, texts: list[str], **agent):
+    return evaluate_response(snapshot(*policies), pieces(texts), **agent)
+
+
+def ai(code: str, action: str = "block", applies_to: str = "both") -> Policy:
+    return policy(code, kind=None, action=action, applies_to=applies_to)
+
+
+def verdict(status: str = "pass", violations=(), rewritten: list[str] | None = None) -> Verdict:
+    return Verdict(
+        status=status,
+        violations=[Violation(code=code, reasoning=reasoning) for code, reasoning in violations],
+        rewritten=rewritten,
+    )
+
+
+MAIL = r"\b\w+@\w+\.pl\b"
 
 
 def body(response) -> dict:
@@ -93,8 +117,9 @@ def test_authority_violation_names_team_and_model():
 
 
 def test_no_policies_is_allowed_with_the_version():
-    decision = evaluate_prompt(snapshot(version=3), IDENTITY, "corporate-b", ["Hello"], {})
+    decision = evaluate_prompt(snapshot(version=3), IDENTITY, "corporate-b", pieces(["Hello"]), {})
     assert (decision.outcome, decision.policy_version, decision.policy_results) == ("allowed", 3, [])
+    assert (decision.control_agent_status, decision.responsible) == ("skipped", [])
 
 
 def test_passing_authority_policy_allows():
@@ -114,13 +139,74 @@ def test_each_authority_policy_gives_one_result_in_order():
     assert [entry.code for entry in decision.policy_results] == ["AUTH-A", "AUTH-B"]
 
 
-def test_ai_policies_add_no_results_yet():
-    ai = policy("AI-X", kind=None, applies_to="both")
-    allowed = prompt(ai, texts=["x"], model="corporate-b")
-    assert (allowed.outcome, allowed.policy_results) == ("allowed", [])
-    blocked = prompt(ai, policy("AUTH-MODEL"), texts=["x"], model="corporate-b")
-    assert blocked.outcome == "blocked"
-    assert [entry.code for entry in blocked.policy_results] == ["AUTH-MODEL"]
+def test_an_ai_block_violation_blocks_naming_the_ai_policy():
+    decision = prompt(
+        ai("AI-X"), texts=["give me the admin password"], verdict=verdict("blocked", [("AI-X", "Asks for a password.")])
+    )
+    [result] = decision.policy_results
+    assert (result.code, result.kind, result.ai, result.action) == ("AI-X", None, True, "block")
+    assert (result.result, result.reasoning) == ("violated", "Asks for a password.")
+    assert (decision.outcome, decision.control_agent_status, decision.responsible) == ("blocked", "blocked", ["AI-X"])
+    assert blocked_error(decision).extra["policies"] == [{"code": "AI-X", "kind": None, "reasoning": "Asks for a password."}]
+
+
+def test_ai_policies_pass_when_the_agent_names_none_and_unknown_codes_are_ignored():
+    decision = prompt(ai("AI-X"), texts=["hi"], verdict=verdict("pass", [("AI-OTHER", "Not a policy here.")]))
+    assert (decision.outcome, decision.control_agent_status) == ("allowed", "pass")
+    assert [(entry.code, entry.result, entry.reasoning) for entry in decision.policy_results] == [("AI-X", "pass", None)]
+
+
+def test_an_empty_reasoning_still_explains_the_violation():
+    decision = prompt(ai("AI-X"), texts=["hi"], verdict=verdict("blocked", [("AI-X", "")]))
+    assert decision.policy_results[0].reasoning == "The control agent found a violation."
+
+
+def test_database_actions_decide_whatever_the_agent_status_says():
+    edited = prompt(ai("AI-X", action="edit"), texts=["hi"], verdict=verdict("blocked", [("AI-X", "r")], ["HI"]))
+    assert (edited.outcome, edited.rewritten, edited.control_agent_status) == ("edited", "HI", "blocked")
+    untouched = prompt(ai("AI-X"), texts=["hi"], verdict=verdict("modified", [], ["changed"]))
+    assert (untouched.outcome, untouched.rewrites, untouched.rewritten) == ("allowed", None, None)
+
+
+def test_the_agent_is_skipped_without_ai_policies_or_edit_matches():
+    decision = prompt(regex("RGX-MAIL", MAIL, action="edit"), texts=["no address here"])
+    assert (decision.outcome, decision.control_agent_status) == ("allowed", "skipped")
+
+
+def test_ai_policies_apply_by_direction():
+    skipped = prompt(ai("AI-ANSWER", applies_to="response"), texts=["hi"])
+    assert (skipped.outcome, skipped.policy_results) == ("allowed", [])
+    judged = response(ai("AI-ANSWER", applies_to="response"), texts=["hi"], verdict=verdict())
+    assert [entry.code for entry in judged.policy_results] == ["AI-ANSWER"]
+
+
+@pytest.mark.parametrize("model", ["corporate-a", "corporate-b"])
+def test_blocks_before_the_agent_never_call_it(model):
+    policies = (ai("AI-X"), policy("AUTH-MODEL"), regex("RGX-KEY", "AKIA"))
+    decision = prompt(*policies, texts=["AKIA" if model == "corporate-a" else "hi"], model=model)
+    assert (decision.outcome, decision.control_agent_status) == ("blocked", "skipped")
+    assert [entry.ai for entry in decision.policy_results] == [False] * len(decision.policy_results)
+
+
+def test_a_limit_block_never_calls_the_agent():
+    decision = prompt(ai("AI-X"), limit("LIM-X"), texts=["hi"], usage=used(1000))
+    assert (decision.outcome, decision.control_agent_status, decision.responsible) == ("blocked", "skipped", ["LIM-X"])
+
+
+def test_the_agent_stage_needs_a_verdict_or_a_failure():
+    with pytest.raises(ValueError):
+        prompt(ai("AI-X"), texts=["hi"])
+
+
+def test_edit_matches_carry_every_distinct_value_including_decoded_ones():
+    encoded = base64.b64encode(b"ola@firma.pl").decode()
+    policies = (regex("RGX-MAIL", MAIL, action="edit"), regex("RGX-CARD", CARD_PATTERN, action="edit"))
+    texts = ["jan@firma.pl and jan@firma.pl", encoded, "4111 1111 1111 1112 and 4111 1111 1111 1111"]
+    results = first_stages(snapshot(*policies), IDENTITY, "corporate-a", texts, {})
+    assert edit_matches(snapshot(*policies), results, texts) == [
+        ("RGX-MAIL", ["jan@firma.pl", "ola@firma.pl"]),
+        ("RGX-CARD", ["4111 1111 1111 1111"]),
+    ]
 
 
 def test_limit_passes_below_max_tokens():
@@ -207,12 +293,92 @@ def test_regex_block_match_blocks():
     assert (result.result, result.reasoning) == ("violated", PROMPT_REASON)
 
 
-def test_edit_only_match_blocks_naming_the_edit_policy():
-    decision = prompt(regex("RGX-MAIL", "@", action="edit"), texts=["a@b"])
-    assert (decision.outcome, decision.rewritten) == ("blocked", None)
-    assert blocked_error(decision).extra["policies"] == [
-        {"code": "RGX-MAIL", "kind": "regex", "reasoning": PROMPT_REASON}
-    ]
+def test_a_regex_edit_with_a_clean_rewrite_is_edited():
+    decision = prompt(
+        regex("RGX-MAIL", MAIL, action="edit"),
+        texts=["mail jan@firma.pl now"],
+        verdict=verdict("modified", [("RGX-MAIL", "An email address.")], ["mail [removed] now"]),
+    )
+    assert (decision.outcome, decision.rewritten, decision.rewrites) == ("edited", "mail [removed] now", ["mail [removed] now"])
+    assert (decision.control_agent_status, decision.responsible) == ("modified", ["RGX-MAIL"])
+    assert "rewrites" not in decision.model_dump() and "agent_failure" not in decision.model_dump()
+
+
+def test_an_edited_prompt_joins_its_pieces_for_the_rewritten_text():
+    decision = prompt(
+        regex("RGX-MAIL", MAIL, action="edit"),
+        texts=["first", "to jan@firma.pl"],
+        verdict=verdict("modified", [], ["first", "to [removed]"]),
+    )
+    assert (decision.outcome, decision.rewritten) == ("edited", "first\n\nto [removed]")
+
+
+def test_a_rewrite_that_still_matches_blocks_under_that_code():
+    encoded = base64.b64encode(b"jan@firma.pl").decode()
+    for rewrite in ["mail jan@firma.pl", f"mail {encoded}"]:
+        decision = prompt(
+            regex("RGX-MAIL", MAIL, action="edit"),
+            ai("AI-TONE", action="edit"),
+            texts=["mail jan@firma.pl"],
+            verdict=verdict("modified", [("AI-TONE", "Rude.")], [rewrite]),
+        )
+        assert (decision.outcome, decision.responsible) == ("blocked", ["RGX-MAIL"])
+        reasons = {entry.code: entry.reasoning for entry in decision.policy_results}
+        assert reasons == {"RGX-MAIL": "The rewritten prompt still matches this policy's pattern.", "AI-TONE": "Rude."}
+        error = blocked_error(decision)
+        assert (error.status_code, [entry["code"] for entry in error.extra["policies"]]) == (403, ["RGX-MAIL"])
+
+
+def test_tool_call_arguments_are_never_rewritten():
+    policies = snapshot(regex("RGX-MAIL", MAIL, action="edit"))
+    mixed = [Piece("mail jan@firma.pl", True), Piece('{"to": "jan@firma.pl"}', False)]
+    blocked = evaluate_prompt(
+        policies, IDENTITY, "corporate-a", mixed, {},
+        verdict=verdict("modified", [], ["mail [removed]", '{"to": "[removed]"}']),
+    )
+    assert (blocked.outcome, blocked.responsible) == ("blocked", ["RGX-MAIL"])
+    clean = [Piece("mail jan@firma.pl", True), Piece('{"n": 1}', False)]
+    edited = evaluate_prompt(
+        policies, IDENTITY, "corporate-a", clean, {}, verdict=verdict("modified", [], ["mail [removed]", "changed"])
+    )
+    assert (edited.outcome, edited.rewrites) == ("edited", ["mail [removed]", '{"n": 1}'])
+
+
+def test_an_ai_block_wins_over_an_edit():
+    decision = prompt(
+        ai("AI-B"),
+        regex("RGX-MAIL", MAIL, action="edit"),
+        texts=["jan@firma.pl"],
+        verdict=verdict("blocked", [("AI-B", "No.")], ["[removed]"]),
+    )
+    assert (decision.outcome, decision.responsible, decision.rewrites) == ("blocked", ["AI-B"], None)
+
+
+def test_an_edit_violation_without_a_rewrite_fails_as_a_missing_rewrite():
+    decision = prompt(regex("RGX-MAIL", MAIL, action="edit"), texts=["jan@firma.pl"], verdict=verdict("pass"))
+    assert (decision.outcome, decision.control_agent_status, decision.agent_failure) == ("blocked", "error", "missing_rewrite")
+
+
+@pytest.mark.parametrize("reason", ["timeout", "unreachable", "unparseable", "missing_rewrite"])
+def test_an_agent_failure_blocks_in_production_with_a_503(reason):
+    decision = prompt(ai("AI-X"), regex("RGX-MAIL", MAIL, action="edit"), texts=["jan@firma.pl"], failure=reason)
+    assert (decision.outcome, decision.control_agent_status) == ("blocked", "error")
+    assert (decision.responsible, decision.agent_failure) == ([], reason)
+    ai_result = next(entry for entry in decision.policy_results if entry.ai)
+    assert (ai_result.result, ai_result.reasoning) == ("error", f"The control agent failed: {FAILURE_TEXT[reason]}.")
+    error = agent_failed_error(decision, "prompt")
+    assert (error.status_code, error.code) == (503, "control_agent_failed")
+    assert error.message == f"The control agent could not check this prompt ({FAILURE_TEXT[reason]}), so it was blocked."
+    assert error.extra == {"policy_version": 7}
+
+
+def test_an_agent_failure_lets_the_text_through_in_development():
+    decision = prompt(
+        ai("AI-X"), regex("RGX-MAIL", MAIL, action="edit"), texts=["jan@firma.pl"], failure="timeout", production=False
+    )
+    assert (decision.outcome, decision.control_agent_status) == ("allowed", "error")
+    assert (decision.rewrites, decision.agent_failure, decision.responsible) == (None, None, [])
+    assert [entry.result for entry in decision.policy_results] == ["violated", "error"]
 
 
 def test_block_and_edit_matches_name_only_the_block_policy():
@@ -338,10 +504,15 @@ def test_response_block_names_the_response_in_the_error():
     }
 
 
-def test_response_edit_only_match_blocks_naming_the_edit_policy():
-    decision = response(regex("RGX-MAIL", "@", action="edit"), regex("RGX-KEY", "AKIA"), texts=["a@b"])
-    assert decision.outcome == "blocked"
-    assert [entry["code"] for entry in blocked_error(decision).extra["policies"]] == ["RGX-MAIL"]
+def test_a_response_edit_is_rewritten_and_rechecked_as_the_response():
+    policies = (regex("RGX-MAIL", MAIL, action="edit"), regex("RGX-KEY", "AKIA"))
+    edited = response(*policies, texts=["write to jan@firma.pl"], verdict=verdict("modified", [], ["write to [removed]"]))
+    assert (edited.outcome, edited.rewrites, edited.responsible) == ("edited", ["write to [removed]"], ["RGX-MAIL"])
+    still = response(*policies, texts=["write to jan@firma.pl"], verdict=verdict("modified", [], ["jan@firma.pl"]))
+    assert still.policy_results[0].reasoning == "The rewritten response still matches this policy's pattern."
+    assert agent_failed_error(response(*policies, texts=["jan@firma.pl"], failure="timeout"), "response").message == (
+        "The control agent could not check this response (it timed out), so it was blocked."
+    )
 
 
 def test_response_block_and_edit_matches_name_only_the_block_policy():
@@ -357,7 +528,7 @@ def test_clean_response_is_allowed():
 
 def test_blocked_error_names_every_violated_block_policy():
     decision = evaluate_prompt(
-        snapshot(policy("AUTH-A"), policy("AUTH-B"), version=4), IDENTITY, "corporate-b", ["Hello"], {}
+        snapshot(policy("AUTH-A"), policy("AUTH-B"), version=4), IDENTITY, "corporate-b", pieces(["Hello"]), {}
     )
     error = blocked_error(decision)
     reason = "Team Payments is not authorized for corporate-b."

@@ -4,9 +4,11 @@ import time
 from typing import Literal
 
 from fastapi import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from . import limits, policies
+from . import control_agent, limits, policies
+from .chat import Piece
+from .control_agent import FAILURE_TEXT, AgentFailure, FailureReason, Verdict
 from .errors import GatewayError
 from .identity import Identity
 from .limits import WindowUsage
@@ -19,6 +21,7 @@ log = logging.getLogger("intentlatch")
 Result = Literal["pass", "violated", "error"]
 Outcome = Literal["allowed", "edited", "blocked"]
 Direction = Literal["prompt", "response"]
+AgentStatus = Literal["skipped", "pass", "blocked", "modified", "error"]
 
 
 class PolicyResult(BaseModel):
@@ -38,6 +41,11 @@ class Decision(BaseModel):
     policy_version: int
     policy_results: list[PolicyResult]
     rewritten: str | None = None
+    control_agent_status: AgentStatus = "skipped"
+    responsible: list[str] = Field(default_factory=list)
+    # Internal: the final text of every piece when edited, and why a fail-closed agent blocked.
+    rewrites: list[str] | None = Field(default=None, exclude=True)
+    agent_failure: FailureReason | None = Field(default=None, exclude=True)
 
 
 def elapsed_ms(started: float) -> float:
@@ -115,6 +123,22 @@ def pattern_matches(pattern: str, views: list[str]) -> bool:
     return any(luhn_counted(match) for view in views for match in compiled.finditer(view))
 
 
+def pattern_values(pattern: str, views: list[str]) -> list[str]:
+    compiled = re.compile(pattern)
+    counted = "luhn" in compiled.groupindex
+    found = [
+        match.group()
+        for view in views
+        for match in compiled.finditer(view)
+        if not counted or luhn_counted(match)
+    ]
+    return list(dict.fromkeys(found))
+
+
+def text_views(texts: list[str]) -> list[str]:
+    return [view for text in texts for view in normalized_views(text)]
+
+
 def regex_result(policy: Policy, views: list[str], direction: Direction) -> PolicyResult:
     started = time.perf_counter()
     violated = pattern_matches(policy.params["pattern"], views)
@@ -133,7 +157,7 @@ def regex_result(policy: Policy, views: list[str], direction: Direction) -> Poli
 def regex_results(
     snapshot: PolicySnapshot, texts: list[str], direction: Direction
 ) -> list[PolicyResult]:
-    views = [view for text in texts for view in normalized_views(text)]
+    views = text_views(texts)
     return [
         regex_result(policy, views, direction)
         for policy in snapshot.policies
@@ -145,29 +169,158 @@ def blocking(results: list[PolicyResult]) -> list[PolicyResult]:
     return [entry for entry in results if entry.result == "violated" and entry.action == "block"]
 
 
-def responsible(results: list[PolicyResult]) -> list[PolicyResult]:
-    # Violated edit policies answer for a block only when no block policy was violated.
-    violated = [entry for entry in results if entry.result == "violated"]
-    return blocking(violated) or violated
+def violated_edits(results: list[PolicyResult]) -> list[PolicyResult]:
+    return [entry for entry in results if entry.result == "violated" and entry.action == "edit"]
 
 
-def decide(results: list[PolicyResult], version: int) -> Decision:
-    # Interim until the control agent (item 9) can rewrite: a violated edit policy blocks too.
-    blocked = any(entry.result == "violated" for entry in results)
+def codes(results: list[PolicyResult]) -> list[str]:
+    return [entry.code for entry in results]
+
+
+def applying_ai_policies(snapshot: PolicySnapshot, direction: Direction) -> list[Policy]:
+    return [policy for policy in snapshot.policies if policy.ai and policy.applies_to in (direction, "both")]
+
+
+def needs_agent(snapshot: PolicySnapshot, results: list[PolicyResult], direction: Direction) -> bool:
+    # A block ends the request before the agent; otherwise it runs for AI policies or edit matches.
+    if blocking(results):
+        return False
+    return bool(applying_ai_policies(snapshot, direction) or violated_edits(results))
+
+
+def edit_matches(
+    snapshot: PolicySnapshot, results: list[PolicyResult], texts: list[str]
+) -> list[tuple[str, list[str]]]:
+    # The matched values go only to the control agent, which must remove them.
+    patterns = {policy.code: policy.params["pattern"] for policy in snapshot.policies if policy.kind == "regex"}
+    views = text_views(texts)
+    return [
+        (entry.code, pattern_values(patterns[entry.code], views))
+        for entry in violated_edits(results)
+        if entry.kind == "regex"
+    ]
+
+
+def ai_results(
+    policies: list[Policy], verdict: Verdict | None, failure: FailureReason | None, latency_ms: float
+) -> list[PolicyResult]:
+    named: dict[str, str] = {}
+    for violation in verdict.violations if verdict is not None else []:
+        named.setdefault(violation.code, violation.reasoning)
+    entries = []
+    for policy in policies:
+        result: Result = "pass"
+        reasoning = None
+        if verdict is None:
+            result, reasoning = "error", f"The control agent failed: {FAILURE_TEXT[failure]}."
+        elif policy.code in named:
+            result, reasoning = "violated", named[policy.code] or "The control agent found a violation."
+        entries.append(
+            PolicyResult(
+                code=policy.code,
+                kind=None,
+                ai=True,
+                action=policy.action,
+                result=result,
+                reasoning=reasoning,
+                latency_ms=latency_ms,
+            )
+        )
+    return entries
+
+
+def recheck(
+    snapshot: PolicySnapshot, edits: list[PolicyResult], texts: list[str]
+) -> list[str]:
+    edited = {entry.code for entry in edits if entry.kind == "regex"}
+    views = text_views(texts)
+    return [
+        policy.code
+        for policy in snapshot.policies
+        if policy.code in edited and pattern_matches(policy.params["pattern"], views)
+    ]
+
+
+def conclude(
+    snapshot: PolicySnapshot,
+    results: list[PolicyResult],
+    pieces: list[Piece],
+    direction: Direction,
+    verdict: Verdict | None,
+    failure: FailureReason | None,
+    latency_ms: float,
+    production: bool,
+) -> Decision:
+    """Applies the blocking rule after the control agent: database actions decide, not its status."""
+    version = snapshot.version
+    results = results + ai_results(applying_ai_policies(snapshot, direction), verdict, failure, latency_ms)
+    status: AgentStatus = verdict.status if verdict is not None else "error"
+    blocked = blocking(results)
+    if blocked:
+        return Decision(
+            outcome="blocked", policy_version=version, policy_results=results,
+            control_agent_status=status, responsible=codes(blocked),
+        )
+    edits = violated_edits(results)
+    if verdict is not None and edits and verdict.rewritten is None:
+        failure, status = "missing_rewrite", "error"
+    if failure is not None:
+        # Fail closed in production; development lets the text through unchanged.
+        return Decision(
+            outcome="blocked" if production else "allowed", policy_version=version, policy_results=results,
+            control_agent_status="error", agent_failure=failure if production else None,
+        )
+    if not edits:
+        return Decision(outcome="allowed", policy_version=version, policy_results=results, control_agent_status=status)
+    # Tool-call arguments keep their original text, so an edit match left there blocks below.
+    final = [
+        rewrite if piece.rewritable else piece.text
+        for piece, rewrite in zip(pieces, verdict.rewritten, strict=True)
+    ]
+    remaining = recheck(snapshot, edits, final)
+    if remaining:
+        still = f"The rewritten {direction} still matches this policy's pattern."
+        results = [entry.model_copy(update={"reasoning": still}) if entry.code in remaining else entry for entry in results]
+        return Decision(
+            outcome="blocked", policy_version=version, policy_results=results,
+            control_agent_status=status, responsible=remaining,
+        )
     return Decision(
-        outcome="blocked" if blocked else "allowed", policy_version=version, policy_results=results
+        outcome="edited", policy_version=version, policy_results=results, rewritten="\n\n".join(final),
+        control_agent_status=status, responsible=codes(edits), rewrites=final,
     )
 
 
-def evaluate_prompt(
+def finish(
+    snapshot: PolicySnapshot,
+    results: list[PolicyResult],
+    pieces: list[Piece],
+    direction: Direction,
+    verdict: Verdict | None = None,
+    failure: FailureReason | None = None,
+    latency_ms: float = 0.0,
+    production: bool = True,
+) -> Decision:
+    if not needs_agent(snapshot, results, direction):
+        blocked = blocking(results)
+        return Decision(
+            outcome="blocked" if blocked else "allowed", policy_version=snapshot.version,
+            policy_results=results, responsible=codes(blocked),
+        )
+    if verdict is None and failure is None:
+        raise ValueError("the control agent's verdict or failure is required")
+    return conclude(snapshot, results, pieces, direction, verdict, failure, latency_ms, production)
+
+
+def first_stages(
     snapshot: PolicySnapshot,
     identity: Identity,
     model: str,
     texts: list[str],
     usage: dict[int, WindowUsage],
-) -> Decision:
-    # Authority and limit policies form the first stage, then regex; the control agent
-    # (item 9) follows. A stage that violates a block policy stops the pipeline.
+) -> list[PolicyResult]:
+    # Authority and limit policies form the first stage, then regex. A stage that
+    # violates a block policy stops the pipeline before the next one.
     results = [
         authority_result(policy, identity, model)
         for policy in snapshot.policies
@@ -176,16 +329,37 @@ def evaluate_prompt(
     results += [limit_result(policy, identity, usage) for policy in team_limits(snapshot, identity)]
     if not blocking(results):
         results += regex_results(snapshot, texts, "prompt")
-    return decide(results, snapshot.version)
+    return results
 
 
-def evaluate_response(snapshot: PolicySnapshot, texts: list[str]) -> Decision:
-    # Authority and limit policies are prompt-only, so a response has only the regex stage.
-    return decide(regex_results(snapshot, texts, "response"), snapshot.version)
+def evaluate_prompt(
+    snapshot: PolicySnapshot,
+    identity: Identity,
+    model: str,
+    pieces: list[Piece],
+    usage: dict[int, WindowUsage],
+    verdict: Verdict | None = None,
+    failure: FailureReason | None = None,
+    production: bool = True,
+) -> Decision:
+    results = first_stages(snapshot, identity, model, [piece.text for piece in pieces], usage)
+    return finish(snapshot, results, pieces, "prompt", verdict, failure, production=production)
+
+
+def evaluate_response(
+    snapshot: PolicySnapshot,
+    pieces: list[Piece],
+    verdict: Verdict | None = None,
+    failure: FailureReason | None = None,
+    production: bool = True,
+) -> Decision:
+    # Authority and limit policies are prompt-only, so a response starts at the regex stage.
+    results = regex_results(snapshot, [piece.text for piece in pieces], "response")
+    return finish(snapshot, results, pieces, "response", verdict, failure, production=production)
 
 
 def blocked_error(decision: Decision) -> GatewayError:
-    blocked = responsible(decision.policy_results)
+    blocked = [entry for entry in decision.policy_results if entry.code in decision.responsible]
     # A block by limits alone lifts when their windows end, so it is 429; any other block is final.
     limited = all(entry.kind == "limit" for entry in blocked)
     return GatewayError(
@@ -202,44 +376,96 @@ def blocked_error(decision: Decision) -> GatewayError:
     )
 
 
+def agent_failed_error(decision: Decision, direction: Direction) -> GatewayError:
+    # No policy was violated, so this is an unavailable check rather than a policy block.
+    return GatewayError(
+        503,
+        "control_agent_failed",
+        f"The control agent could not check this {direction}"
+        f" ({FAILURE_TEXT[decision.agent_failure]}), so it was blocked.",
+        extra={"policy_version": decision.policy_version},
+    )
+
+
 def enforce(request: Request, decision: Decision, direction: Direction) -> None:
-    if decision.outcome == "blocked":
-        codes = ",".join(entry.code for entry in responsible(decision.policy_results))
-        log.info(
-            "policy blocked request_id=%s direction=%s codes=%s",
+    if decision.outcome != "blocked":
+        return
+    log.info(
+        "policy blocked request_id=%s direction=%s codes=%s",
+        request.state.request_id,
+        direction,
+        ",".join(decision.responsible) or "control-agent",
+    )
+    if decision.agent_failure is not None:
+        raise agent_failed_error(decision, direction)
+    raise blocked_error(decision)
+
+
+async def judged(
+    request: Request,
+    snapshot: PolicySnapshot,
+    results: list[PolicyResult],
+    pieces: list[Piece],
+    direction: Direction,
+) -> Decision:
+    production = request.app.state.settings.environment == "production"
+    if not needs_agent(snapshot, results, direction):
+        return finish(snapshot, results, pieces, direction, production=production)
+    texts = [piece.text for piece in pieces]
+    body = control_agent.agent_request(
+        direction,
+        request.state.identity,
+        applying_ai_policies(snapshot, direction),
+        edit_matches(snapshot, results, texts),
+        texts,
+    )
+    started = time.perf_counter()
+    verdict, failure = None, None
+    try:
+        verdict = await control_agent.judge(
+            request.app.state.control_agent, request.app.state.settings.control_agent_model, body
+        )
+    except AgentFailure as exc:
+        failure = exc.reason
+        log.warning(
+            "control agent failed request_id=%s direction=%s reason=%s",
             request.state.request_id,
             direction,
-            codes,
+            failure,
         )
-        raise blocked_error(decision)
+    return finish(snapshot, results, pieces, direction, verdict, failure, elapsed_ms(started), production)
 
 
 async def prompt_decision(
-    request: Request, model: str, texts: list[str]
+    request: Request, model: str, pieces: list[Piece]
 ) -> tuple[PolicySnapshot, Decision]:
     pool = request.app.state.pool
     identity = request.state.identity
     snapshot = await policies.load_snapshot(pool)
     windows = {policy.params["window_seconds"] for policy in team_limits(snapshot, identity)}
     usage = await limits.load_usage(pool, identity.team_id, windows)
-    return snapshot, evaluate_prompt(snapshot, identity, model, texts, usage)
+    results = first_stages(snapshot, identity, model, [piece.text for piece in pieces], usage)
+    return snapshot, await judged(request, snapshot, results, pieces, "prompt")
 
 
-async def decide_prompt(request: Request, model: str, texts: list[str]) -> Decision:
-    _, decision = await prompt_decision(request, model, texts)
+async def decide_prompt(request: Request, model: str, pieces: list[Piece]) -> Decision:
+    _, decision = await prompt_decision(request, model, pieces)
     return decision
 
 
 async def enforce_prompt_policies(
-    request: Request, model: str, texts: list[str]
-) -> PolicySnapshot:
+    request: Request, model: str, pieces: list[Piece]
+) -> tuple[PolicySnapshot, Decision]:
     # Returns the snapshot so the response is checked against the same policy version.
-    snapshot, decision = await prompt_decision(request, model, texts)
+    snapshot, decision = await prompt_decision(request, model, pieces)
     enforce(request, decision, "prompt")
-    return snapshot
+    return snapshot, decision
 
 
-def enforce_response_policies(
-    request: Request, snapshot: PolicySnapshot, texts: list[str]
-) -> None:
-    enforce(request, evaluate_response(snapshot, texts), "response")
+async def enforce_response_policies(
+    request: Request, snapshot: PolicySnapshot, pieces: list[Piece]
+) -> Decision:
+    results = regex_results(snapshot, [piece.text for piece in pieces], "response")
+    decision = await judged(request, snapshot, results, pieces, "response")
+    enforce(request, decision, "response")
+    return decision

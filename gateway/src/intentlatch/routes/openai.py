@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import limits, pipeline, upstream
 from ..auth import require_identity
-from ..chat import ChatRequest, allowlisted, message_texts, prompt_texts
+from ..chat import ChatRequest, Piece, allowlisted, apply_rewrites, message_pieces, prompt_pieces, rewrite_message
 
 router = APIRouter(dependencies=[Depends(require_identity)])
 
@@ -46,9 +46,11 @@ async def list_models(request: Request) -> dict[str, Any]:
 async def chat_completions(body: OpenAIChatRequest, request: Request) -> Response:
     tag = request.app.state.llms.tag_for(body.model)
     data = body.model_dump(exclude_unset=True)
-    snapshot = await pipeline.enforce_prompt_policies(
-        request, body.model, prompt_texts(data["messages"])
+    snapshot, decision = await pipeline.enforce_prompt_policies(
+        request, body.model, prompt_pieces(data["messages"])
     )
+    if decision.rewrites is not None:
+        data["messages"] = apply_rewrites(data["messages"], decision.rewrites)
     payload = allowlisted(data, FORWARDED_FIELDS) | {"model": tag, "stream": False}
     completion = await upstream.request_json(
         request.app.state.ollama, "POST", "/v1/chat/completions", json=payload
@@ -57,7 +59,9 @@ async def chat_completions(body: OpenAIChatRequest, request: Request) -> Respons
     await limits.record_usage(
         request.app.state.pool, request.state.identity.team_id, completion_usage(completion)
     )
-    pipeline.enforce_response_policies(request, snapshot, completion_texts(completion))
+    answer = await pipeline.enforce_response_policies(request, snapshot, completion_pieces(completion))
+    if answer.rewrites is not None:
+        completion = apply_completion_rewrites(completion, answer.rewrites)
     completion["model"] = body.model
     if not body.stream:
         return JSONResponse(completion)
@@ -68,16 +72,35 @@ async def chat_completions(body: OpenAIChatRequest, request: Request) -> Respons
     )
 
 
-def completion_texts(completion: dict[str, Any]) -> list[str]:
+def completion_pieces(completion: dict[str, Any]) -> list[Piece]:
     choices = completion.get("choices")
     if not isinstance(choices, list):
         return []
     return [
-        text
+        piece
         for choice in choices
         if isinstance(choice, dict)
-        for text in message_texts(choice.get("message"))
+        for piece in message_pieces(choice.get("message"))
     ]
+
+
+def completion_texts(completion: dict[str, Any]) -> list[str]:
+    return [piece.text for piece in completion_pieces(completion)]
+
+
+def apply_completion_rewrites(completion: dict[str, Any], texts: list[str]) -> dict[str, Any]:
+    choices = completion.get("choices")
+    if not isinstance(choices, list):
+        return completion
+    remaining = iter(texts)
+    return completion | {
+        "choices": [
+            choice | {"message": rewrite_message(choice["message"], remaining)}
+            if isinstance(choice, dict) and "message" in choice
+            else choice
+            for choice in choices
+        ]
+    }
 
 
 def completion_usage(completion: dict[str, Any]) -> int:
