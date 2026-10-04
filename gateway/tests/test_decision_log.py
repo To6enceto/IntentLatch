@@ -1,11 +1,23 @@
 import base64
+import re
 import uuid
 from datetime import UTC, datetime
 
-from intentlatch.decision_log import GENESIS, canonical, chain, mask_text, record_hash, records
+import pytest
+
+from intentlatch.decision_log import (
+    GENESIS,
+    canonical,
+    chain,
+    counted_spans,
+    mask_text,
+    record_hash,
+    records,
+    replace_spans,
+)
 from intentlatch.identity import Identity
 from intentlatch.pipeline import Decision, PolicyResult
-from intentlatch.policies import Policy, PolicySnapshot
+from intentlatch.policies import SNAPSHOT_FIELDS, Policy, PolicySnapshot, load_seeds
 from intentlatch.trace import Stage, Trace
 
 EMPLOYEE = uuid.uuid4()
@@ -43,6 +55,30 @@ def test_a_value_only_a_normalized_view_shows_masks_the_whole_piece():
     encoded = base64.b64encode(b"jan@firma.pl").decode()
     assert mask_text(f"see {encoded}", [MAIL, CARD]) == "[masked: RGX-MAIL]"
     assert mask_text("jan@​firma.pl", [MAIL]) == "[masked: RGX-MAIL]"
+
+
+SEEDED_CARD = Policy(**next(seed for seed in load_seeds() if seed.code == "RGX-CARD").model_dump(include=set(SNAPSHOT_FIELDS)))
+
+
+@pytest.mark.parametrize(
+    ("text", "masked"),
+    [
+        ("pay 4111 1111 1111 1111 12/26 now", "pay [RGX-CARD] 12/26 now"),
+        ("from 2345 4111 1111 1111 1111", "from 2345 [RGX-CARD]"),
+        ("cards 4111111111111111 and 5555 5555 5555 4444.", "cards [RGX-CARD] and [RGX-CARD]."),
+        ("not 4111 1111 1111 1112 12/26", "not 4111 1111 1111 1112 12/26"),
+    ],
+)
+def test_a_lookahead_luhn_pattern_masks_only_the_card_digits(text, masked):
+    assert mask_text(text, [SEEDED_CARD]) == masked
+
+
+def test_overlapping_captures_mask_once():
+    # 18, 83 and 34 all pass the checksum and overlap, so one placeholder covers 1834.
+    pairs = regex("RGX-PAIR", r"(?=(?P<luhn>\d\d))")
+    assert mask_text("x1834y", [pairs]) == "x[RGX-PAIR]y"
+    assert counted_spans(re.compile(r"(?=(?P<luhn>\d\d))"), "x1834y 59") == [(1, 5), (7, 9)]
+    assert replace_spans("abcdef", [(1, 3), (4, 5)], "[X]") == "a[X]d[X]f"
 
 
 def test_text_without_matches_is_unchanged():

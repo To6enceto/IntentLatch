@@ -10,7 +10,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from . import db
-from .pipeline import PolicyResult, luhn_counted, pattern_matches, text_views
+from .pipeline import PolicyResult, luhn_counted, matched_span, pattern_matches, text_views
 from .policies import Policy, PolicySnapshot
 from .trace import Stage, Trace
 
@@ -60,15 +60,34 @@ def regex_policies(snapshot: PolicySnapshot) -> list[Policy]:
     return [policy for policy in snapshot.policies if policy.kind == "regex"]
 
 
+def counted_spans(compiled: re.Pattern[str], text: str) -> list[tuple[int, int]]:
+    """The spans of checksum-valid captures, merged where they touch or overlap."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(matched_span(match) for match in compiled.finditer(text) if luhn_counted(match)):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def replace_spans(text: str, spans: list[tuple[int, int]], placeholder: str) -> str:
+    pieces, last = [], 0
+    for start, end in spans:
+        pieces += [text[last:start], placeholder]
+        last = end
+    return "".join(pieces) + text[last:]
+
+
 def mask_text(text: str, policies: list[Policy]) -> str:
     masked = text
     for policy in policies:
         compiled = re.compile(policy.params["pattern"])
-        counted = "luhn" in compiled.groupindex
         placeholder = f"[{policy.code}]"
-        masked = compiled.sub(
-            lambda match: placeholder if not counted or luhn_counted(match) else match.group(), masked
-        )
+        if "luhn" in compiled.groupindex:
+            masked = replace_spans(masked, counted_spans(compiled, masked), placeholder)
+        else:
+            masked = compiled.sub(lambda match: placeholder, masked)
     # A value only a normalized view shows (encoded, or split by invisible characters)
     # cannot be cut out of the raw text, so the whole piece is withheld.
     hidden = [policy.code for policy in policies if pattern_matches(policy.params["pattern"], text_views([masked]))]

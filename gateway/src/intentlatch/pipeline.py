@@ -116,6 +116,13 @@ def luhn_counted(match: re.Match[str]) -> bool:
     return luhn_valid([int(char) for char in captured if char.isdecimal()])
 
 
+def matched_span(match: re.Match[str]) -> tuple[int, int]:
+    # A lookahead pattern matches no text, so it tries every start position; its luhn group holds the value.
+    if match.start() == match.end() and "luhn" in match.re.groupindex and match.group("luhn") is not None:
+        return match.span("luhn")
+    return match.span()
+
+
 def pattern_matches(pattern: str, views: list[str]) -> bool:
     compiled = re.compile(pattern)
     if "luhn" not in compiled.groupindex:
@@ -128,7 +135,7 @@ def pattern_values(pattern: str, views: list[str]) -> list[str]:
     compiled = re.compile(pattern)
     counted = "luhn" in compiled.groupindex
     found = [
-        match.group()
+        view[slice(*matched_span(match))]
         for view in views
         for match in compiled.finditer(view)
         if not counted or luhn_counted(match)

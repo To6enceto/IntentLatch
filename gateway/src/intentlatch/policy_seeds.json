@@ -71,7 +71,7 @@
     "code": "RGX-CARD",
     "ai": false,
     "kind": "regex",
-    "params": {"pattern": "\\b(?P<luhn>[2-6]\\d{3}(?:[ -]?\\d){9,15})\\b"},
+    "params": {"pattern": "(?=\\b(?P<luhn>[2-6]\\d{12,18}(?!\\d)|[2-6]\\d{3}(?:[ -]\\d{4}){2}[ -]\\d{1,7}(?!\\d)|3[47]\\d{2}[ -]\\d{6}[ -]\\d{5}(?!\\d)))"},
     "action": "edit",
     "applies_to": "both",
     "enabled": true

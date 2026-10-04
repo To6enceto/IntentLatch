@@ -20,8 +20,9 @@ from intentlatch.pipeline import (
     first_stages,
     luhn_valid,
     pattern_matches,
+    pattern_values,
 )
-from intentlatch.policies import Policy, PolicySnapshot
+from intentlatch.policies import Policy, PolicySnapshot, load_seeds
 
 IDENTITY = Identity(
     employee_id=uuid.uuid4(),
@@ -207,6 +208,22 @@ def test_edit_matches_carry_every_distinct_value_including_decoded_ones():
         ("RGX-MAIL", ["jan@firma.pl", "ola@firma.pl"]),
         ("RGX-CARD", ["4111 1111 1111 1111"]),
     ]
+
+
+SEEDED_CARD = next(seed for seed in load_seeds() if seed.code == "RGX-CARD").params["pattern"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["pay 4111 1111 1111 1111 12/26 now", "from 2345 4111 1111 1111 1111", "card 4111 1111 1111 1111 123"],
+)
+def test_a_lookahead_pattern_hands_the_agent_its_luhn_capture(text):
+    assert pattern_values(SEEDED_CARD, [text]) == ["4111 1111 1111 1111"]
+
+
+def test_a_lookahead_pattern_without_a_valid_capture_has_no_values():
+    assert pattern_values(SEEDED_CARD, ["4111 1111 1111 1112 12/26"]) == []
+    assert pattern_values(r"(?=(?P<other>\d{4}))", ["1234"]) == [""]
 
 
 def test_limit_passes_below_max_tokens():

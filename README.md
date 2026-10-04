@@ -188,8 +188,14 @@ rewrites the text (see below). The reasoning never repeats the matched text.
 
 A pattern with a group named `luhn` counts a match only when the digits that
 group captured pass the Luhn checksum, which is how `RGX-CARD` skips most random
-long numbers. Patterns run without a timeout, so avoid nested unbounded repeats
-such as `(a+)+`.
+long numbers. A pattern wrapped in a lookahead, `(?=...)`, is tried at every
+position and stands for what its `luhn` group captured, which is what gets
+masked and handed to the control agent. `RGX-CARD` works this way, so a card
+next to its expiry date, its CVV or a year still matches. A database seeded
+before that change keeps its old `RGX-CARD` pattern until an admin replaces it
+with `PATCH /admin/policies/RGX-CARD`, since seeding never overwrites a policy.
+Patterns run without a timeout, so avoid nested unbounded repeats such as
+`(a+)+`.
 
 | Seeded policy | Finds | Action | Applies to |
 |---|---|---|---|
