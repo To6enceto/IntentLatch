@@ -435,9 +435,12 @@ curl -s localhost:8080/check -H "Authorization: Bearer $TOKEN" \
 
 | Seeded AI policy | Rule | Action | Applies to |
 |---|---|---|---|
-| `AI-NO-CREDENTIALS` | no asking for or sharing passwords, keys or tokens | block | both |
+| `AI-NO-CREDENTIALS` | no asking for or sharing passwords, keys or tokens | block | prompt |
 | `AI-NO-JAILBREAK` | no attempts to make the AI ignore its instructions | block | prompt |
 | `AI-NO-COMMITMENTS` | no binding price, discount or refund promises | edit | response |
+
+`AI-NO-CREDENTIALS` checks prompts only: on answers the 3B agent raised false alarms, and the
+regex seeds already block real keys, tokens and private keys in answers.
 
 With these seeds enabled every chat request calls the agent, which takes roughly
 5 to 15 s per call on CPU. Disable a seed to skip it. Tool definitions go to the

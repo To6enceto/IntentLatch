@@ -23,7 +23,7 @@ REGEX_SEEDS = {
 }
 
 AI_SEEDS = {
-    "AI-NO-CREDENTIALS": ("block", "both"),
+    "AI-NO-CREDENTIALS": ("block", "prompt"),
     "AI-NO-JAILBREAK": ("block", "prompt"),
     "AI-NO-COMMITMENTS": ("edit", "response"),
 }

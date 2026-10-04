@@ -12,7 +12,7 @@
     "ai": true,
     "text": "Must not ask for, share or help obtain passwords, API keys, access tokens, private keys or other credentials, whether the employee's own or anyone else's.",
     "action": "block",
-    "applies_to": "both",
+    "applies_to": "prompt",
     "enabled": true
   },
   {
