@@ -7,19 +7,28 @@ live. Built for the HackYeah 2026 "AI Control Layer" challenge.
 ## Layout
 
 - `gateway/` - the control gateway (Python, FastAPI)
-- `console/` - the standalone management console shell (React, Vite, TypeScript)
+- `console/` - the management console (React, Vite, TypeScript)
 
 ## Run the console locally
 
-Use Node 22.22+ and npm. From the repository root:
+Use Node 22.22+ and npm. The console signs in against the gateway, so start
+the gateway first (see below) and create a console account. From the
+repository root:
 
 ```bash
 npm --prefix console ci
 npm --prefix console run dev -- --host 127.0.0.1
 ```
 
-Open the local URL printed by Vite, normally `http://127.0.0.1:5173`.
-The frontend runs independently of the gateway, its `.env`, and the cluster.
+Open the local URL printed by Vite, normally `http://127.0.0.1:5173`. Vite
+proxies `/console/*` and `/admin/*` to the gateway at `http://127.0.0.1:8080`;
+set `INTENTLATCH_GATEWAY_URL` to use another address, for example when port
+8080 is taken by a `kubectl port-forward` to the cluster:
+
+```bash
+INTENTLATCH_GATEWAY_URL=http://127.0.0.1:8081 npm --prefix console run dev -- --host 127.0.0.1
+```
+
 Geist fonts load from Google Fonts, with system font fallbacks when unavailable.
 
 ```bash
@@ -27,8 +36,9 @@ npm --prefix console run typecheck
 npm --prefix console run build
 ```
 
-The production files are written to `console/dist/`. Future hosting must serve
-`index.html` for console routes to support direct links and reloads.
+The production files are written to `console/dist/`. Hosting must serve
+`index.html` for console routes, and must route `/console/*` and `/admin/*` to
+the gateway on the same origin as the console.
 
 | Route | Page |
 | --- | --- |
@@ -38,25 +48,154 @@ The production files are written to `console/dist/`. Future hosting must serve
 | `/policies` | Policies |
 | `/tests` | Test cases |
 | `/reports` | Reports |
-| `/login` | Standalone login presentation |
+| `/login` | Sign in |
 
-The five management pages contain placeholders for later features. Unknown
+Every route except `/login` needs a signed-in console session; without one the
+console opens `/login` and returns to the requested page after sign-in. Unknown
 routes show a not-found page with a link to Metrics. The sidebar can collapse,
 and the theme control stores only `intentlatch.theme` (`dark` or `light`) in
 localStorage. Missing, invalid or blocked storage defaults to dark.
 
-This is feature 14a: the frontend shell. Authentication, sessions, accounts and
-server-enforced roles are deferred to 14b. The login form checks a nonblank
-username and a nonempty password, then announces "Sign-in is unavailable."
-It stays on `/login`; credentials are neither submitted nor persisted by the
-application. The console has no trusted current user or gateway connection yet.
+## Console accounts and roles
 
-For a visual review, open Metrics and Login at 1440x900 and 1280x900 in each
-theme. Visit all five links, reload a direct route, and use browser Back/Forward.
-Use Tab to reach the skip link, navigation, collapse and theme controls. On
-Login, submit empty fields, a whitespace-only username, and then nonempty
-fields; check focus, feedback and the password visibility control. Leave and
-return to confirm the form is empty. Reload to check theme persistence.
+There are no default accounts. Create the first administrator with the
+`intentlatch` command, which prompts for the password (12 to 256 characters):
+
+```bash
+set -a && . gateway/.env && set +a          # provides INTENTLATCH_DATABASE_URL
+.venv/bin/intentlatch console-user create alice --role admin
+.venv/bin/intentlatch console-user list
+.venv/bin/intentlatch console-user password alice   # new password; ends alice's sessions
+.venv/bin/intentlatch console-user delete alice
+```
+
+| Role | May |
+| --- | --- |
+| `viewer` | Read every console page |
+| `analyst` | Everything a viewer may, plus add, edit and run test cases, and read reports |
+| `admin` | Everything, including changing teams, employees and policies |
+
+The gateway enforces roles, not the console: a console session reaches the
+`/admin` API, where `GET` needs `viewer` and every change needs `admin`, except
+test cases and runs, which need `analyst`, and reports, which need `analyst`
+even to read because they hold prompt and response text. The admin API key keeps working for
+scripts.
+
+Sign-in creates a session that lasts 8 hours. The browser holds it in the
+`intentlatch_session` cookie (HttpOnly, SameSite=Strict, and Secure over
+HTTPS); the database stores only a SHA-256 of it. Passwords are stored as
+salted scrypt hashes. A wrong username and a wrong password get the same
+answer. Console requests that change something must carry the
+`X-IntentLatch-Console` header, which a cross-site page cannot send.
+
+| Endpoint | Does |
+| --- | --- |
+| `POST /console/session` | Signs in with `{"username", "password"}`; sets the cookie |
+| `GET /console/session` | Returns the signed-in `{"user": {"id", "username", "role"}}` |
+| `DELETE /console/session` | Signs out and clears the cookie |
+
+## Teams & identities page
+
+Lists teams with their authorized models. A viewer sees everything read-only.
+An admin can:
+
+- create a team with a name and at least one model; names are unique,
+  ignoring case
+- change a team's authorized models, which applies from its employees' next
+  request
+- add an employee, which shows the new employee token once, with a copy button
+- reissue an employee's token, which stops the old one and shows the new one
+  once
+- revoke an employee, after which that employee cannot get a token again
+
+The selected team is kept in the URL (`/teams?team=<id>`), so it survives a
+reload and works with Back and Forward.
+
+## Policies page
+
+Lists every policy with its type, rule, action, what it applies to, whether it
+is enabled, and the global policy version. Search matches codes and rules;
+filters narrow by type and status. A viewer can open any policy read-only. An
+admin can:
+
+- create a policy. The form follows the choices: an AI policy asks for a
+  plain-language rule; a non-AI policy asks for its kind, then a regex pattern,
+  a limit's token budget, window and team, or nothing for authority. Authority
+  and limit policies are fixed to block prompts.
+- see as they type whether a code is valid and unused; it is stored in upper
+  case. The gateway's own checks, such as an invalid Python regex or an unknown
+  team, appear on the field they concern.
+- edit a policy's rule, settings, action, scope and status. The code, type and
+  kind cannot change, and the console sends only the fields that changed.
+- enable or disable a policy from the list. Disabling asks for confirmation,
+  and disabling `AUTH-MODEL` warns that every token can then call every model.
+
+## Metrics page
+
+The gateway's own metrics are described under [Metrics](#metrics) below.
+The console's Metrics page reads these back through the gateway:
+`GET /admin/metrics?range=1h|6h|24h|7d` (viewer and up) runs a fixed set of
+PromQL queries against `INTENTLATCH_PROMETHEUS_URL` and returns the page's
+panels. The browser never sends PromQL, so the console cannot read the rest of
+the cluster's metrics. Without the setting, the endpoint answers 503
+`metrics_unavailable` and the page explains what to set.
+
+The page shows request, block, edit and error counts, p95 response time and
+rejected credentials; requests by outcome over time; the policies that block and
+edit most; p95 response time over time; and tables by team (with tokens), model,
+stage, control agent verdict and credential failure reason. Every chart has a
+table view. It refreshes every 30 seconds.
+
+To try it locally, run a Prometheus that scrapes the local gateway, and point
+the gateway at it:
+
+```bash
+cat > /tmp/prometheus.yml <<'YAML'
+global: {scrape_interval: 5s}
+scrape_configs:
+  - job_name: intentlatch-gateway
+    static_configs: [{targets: ["127.0.0.1:8080"]}]
+YAML
+docker run -d --name intentlatch-prometheus --network host \
+  -v /tmp/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z prom/prometheus:v3.5.0 \
+  --config.file=/etc/prometheus/prometheus.yml --web.listen-address=127.0.0.1:9090
+echo INTENTLATCH_PROMETHEUS_URL=http://127.0.0.1:9090 >> gateway/.env   # then restart the gateway
+```
+
+In the cluster, set `INTENTLATCH_PROMETHEUS_URL` to the monitoring stack's
+Prometheus service, and allow the gateway to reach it.
+
+## Test cases page
+
+Built on the gateway's [test cases](#test-cases) API. Analysts and admins can
+add a case, edit any case (predefined ones included; codes are permanent),
+duplicate one, and run one case or all of them. A run answers only when its last
+case ends, so while it runs the page finds it in the run history and polls it:
+results appear as each case finishes. Each case shows its latest result from
+the recent runs, and the Run history tab shows every result with the policies
+that fired. Viewers see everything read-only.
+
+The form follows the expected outcome: a policy that must fire for `EDIT` and
+`BLOCK`, and for `EDIT` the strings the rewrite must not contain. A case runs as
+any active employee, by default the seeded test runner, whose team's models
+apply.
+
+## Reports page
+
+Built on the gateway's [reports](#reports) API, which reads the
+[decision log](#decision-log); the log stores only masked text. Besides the regex
+masking described there, any run of 32 or more encoding characters that mixes
+letters and digits is stored as `[encoded value]`: a policy can match only a
+secret's first line, as with a PEM `BEGIN ... PRIVATE KEY` header, and the key
+material follows it.
+
+The page picks a range (last hour, 24 hours, 7 or 30 days, or a custom range),
+then filters the report's items by outcome, side, team, policy and text, newest
+first, and keeps the filters in the URL. It shows totals, the policies that fired
+and teams; opening an item shows each policy's reasoning, the control agent's
+verdict, the masked text and the masked rewrite when the text was edited. The
+items and totals CSV exports, and the JSON download, cover the whole range.
+Reports need the analyst role, because they hold prompt text.
 
 ## Run the gateway locally
 
@@ -468,7 +607,8 @@ needs `.venv/bin/pip install -e "./gateway[test]"` again. It defaults to
 
 A report lists every edited and blocked prompt and response in a past time
 range, read from the decision log, with the policies that fired and their
-reasoning, plus totals by policy, team and model. Reports need the admin key.
+reasoning, plus totals by policy, team and model. Reports need the admin key, or
+a console session with the analyst or admin role.
 
 ```bash
 RANGE='from=2026-10-04T00:00:00Z&to=2026-10-04T06:00:00Z'

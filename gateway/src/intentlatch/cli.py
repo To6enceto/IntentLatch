@@ -6,6 +6,8 @@ from typing import Any, TextIO
 
 import httpx
 
+from . import console_cli
+
 # The gateway's port in its container and in development.
 DEFAULT_URL = "http://127.0.0.1:8080"
 ADMIN_KEY_VAR = "INTENTLATCH_ADMIN_API_KEY"
@@ -21,6 +23,7 @@ def parser() -> argparse.ArgumentParser:
     run = actions.add_parser("run", help="run test cases through the gateway's check endpoint")
     run.add_argument("--case", dest="cases", action="append", metavar="CODE", help="run only this case; repeat for more")
     run.add_argument("--url", default=DEFAULT_URL, help=f"the gateway's base URL (default {DEFAULT_URL})")
+    console_cli.add_parser(commands)
     return root
 
 
@@ -88,6 +91,8 @@ def main(
 ) -> int:
     """`intentlatch test run`: 0 when every case passed, 1 when any failed, 2 when the run could not happen."""
     args = parser().parse_args(argv)
+    if args.command == "console-user":
+        return console_cli.run(args, environ)
     err = err or sys.stderr
     key = environ.get(ADMIN_KEY_VAR)
     if not key:

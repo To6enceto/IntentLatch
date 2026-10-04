@@ -19,7 +19,7 @@ challenge.
 ## Repository layout
 
 - `gateway/` - the control gateway, Python package `intentlatch` (src layout)
-- `console/` - the management console shell, React + Vite + TypeScript
+- `console/` - the management console, React + Vite + TypeScript
 - `deploy/` - Helm chart and cluster setup (not created yet)
 
 ## Proportional engineering
@@ -51,11 +51,21 @@ and installed dependencies before adding machinery.
   database, never from token claims or a request body.
 - `POST /authority` reports what a token may do (`valid`, employee, team,
   authorized models). An invalid token reveals only `valid: false` and a reason.
-- Gateway-owned APIs live at the root (`/admin`, `/authority`, `/healthz`), not
-  under `/v1` (OpenAI's namespace) or `/api` (Ollama's).
+- Gateway-owned APIs live at the root (`/admin`, `/authority`, `/console`,
+  `/healthz`, `/metrics`), not under `/v1` (OpenAI's namespace) or `/api` (Ollama's).
+- Metrics are defined in `gateway/src/intentlatch/metrics.py`; the console reads
+  them only through the fixed queries in `prometheus.py`, never raw PromQL.
+- Console users sign in with a password and get a session cookie. On `/admin`
+  a console session needs `viewer` for `GET` and `admin` for changes, except
+  that analysts write test cases and runs and only analysts and admins read
+  reports (`PATH_ROLES` in `auth.py`). The gateway enforces this, the console
+  only hides what a role cannot do. There are no default accounts:
+  `intentlatch console-user create` makes them.
 - Never log, echo or store an employee token, the signing key or the admin key.
 - Never log or store raw identity tokens or raw sensitive values. Mask regex
-  matches before writing decision records.
+  matches before writing decision records (`decision_log.py`;
+  `tests/test_decision_log_masking.py` checks that masked text no longer trips
+  any regex policy).
 - Prometheus label values stay bounded: team, model, policy code, kind, outcome,
   reason. Never employee IDs, prompts, tokens or free text.
 - No em dashes in generated docs, comments or commit messages.
@@ -77,11 +87,16 @@ Run from the repository root unless noted.
   `../.venv/bin/uvicorn intentlatch.main:app --reload --port 8080 --env-file .env`
   (binds to 127.0.0.1; `README.md` shows the admin bootstrap flow)
 - Health: `curl -s localhost:8080/healthz`
+- Metrics: `curl -s localhost:8080/metrics`; the console's Metrics page also
+  needs `INTENTLATCH_PROMETHEUS_URL` (README.md shows a local Prometheus)
 - Test: `.venv/bin/pytest gateway` (pytest; tests live in `gateway/tests/`,
   named `test_<module>.py`). This is the test gate for logic-bearing changes.
 - Console setup (Node 22.22+): `npm --prefix console ci`
 - Console dev server: `npm --prefix console run dev -- --host 127.0.0.1`
-  (standalone frontend; no gateway or cluster credentials required).
+  (proxies `/console` and `/admin` to the gateway at `INTENTLATCH_GATEWAY_URL`,
+  default `http://127.0.0.1:8080`; signing in needs a running gateway).
+- Console account (prompts for the password):
+  `set -a && . gateway/.env && set +a && .venv/bin/intentlatch console-user create <name> --role admin`
 - Console typecheck: `npm --prefix console run typecheck`
 - Console build: `npm --prefix console run build`
 - Lint: none configured.

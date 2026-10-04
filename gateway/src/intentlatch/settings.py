@@ -15,6 +15,7 @@ ENV_VARS = {
     "control_agent_url": "INTENTLATCH_CONTROL_AGENT_URL",
     "control_agent_model": "INTENTLATCH_CONTROL_AGENT_MODEL",
     "environment": "INTENTLATCH_ENVIRONMENT",
+    "prometheus_url": "INTENTLATCH_PROMETHEUS_URL",
 }
 REQUIRED = (
     "database_url",
@@ -43,6 +44,8 @@ class Settings(BaseModel):
     control_agent_model: str | None = None
     # Production is the default, so a missing setting fails closed.
     environment: Literal["production", "development"] = "production"
+    # Optional: only the console's Metrics page reads from it.
+    prometheus_url: str | None = None
 
     @model_validator(mode="after")
     def _control_agent_defaults(self) -> Self:

@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request, Response
 from . import db, decision_log, metrics, policies, testcases
 from .errors import GatewayError, error_response, install_error_handlers
 from .llms import CorporateLlms
-from .routes import admin, authority, check, health, ollama, openai
+from .routes import admin, authority, check, console, health, ollama, openai
 from .routes import metrics as metrics_route
 from .settings import load_settings
 
@@ -62,6 +62,9 @@ def create_app(
         applied = await db.migrate(settings.database_url, db.MIGRATIONS_DIR)
         log.info("database migrations applied: %d", len(applied))
         pool = await db.open_pool(settings.database_url)
+        prometheus = (
+            httpx.AsyncClient(base_url=settings.prometheus_url) if settings.prometheus_url else None
+        )
         try:
             seeded = await policies.seed_policies(pool, seeds)
             log.info("policy seeds inserted: %d", seeded)
@@ -82,8 +85,13 @@ def create_app(
                 app.state.control_agent = control_agent
                 app.state.llms = CorporateLlms.from_settings(settings)
                 app.state.started_at = int(time.time())
+                app.state.prometheus = prometheus
+                # Sets intentlatch_policies_active before the first request.
+                metrics.set_active_policies(await policies.load_snapshot(pool))
                 yield
         finally:
+            if prometheus is not None:
+                await prometheus.aclose()
             await pool.close()
 
     app = FastAPI(title="IntentLatch gateway", lifespan=lifespan)
@@ -117,9 +125,11 @@ def create_app(
     app.include_router(openai.router)
     app.include_router(ollama.router)
     app.include_router(admin.router)
+    app.include_router(console.router)
     app.include_router(authority.router)
     app.include_router(check.router)
     app.include_router(metrics_route.router)
+    app.include_router(metrics_route.dashboard_router)
     return app
 
 

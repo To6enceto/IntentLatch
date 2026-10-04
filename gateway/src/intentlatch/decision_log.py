@@ -39,6 +39,11 @@ FIELDS = (
     "test_run_id",
 )
 JSON_FIELDS = {"policy_results", "stage_latency_ms"}
+# Key material and tokens: long runs of encoding characters that mix letters and digits.
+# A policy can match only a secret's first line (a PEM "BEGIN ... PRIVATE KEY" header),
+# so these are masked whatever matched; natural language never looks like this.
+SECRET_SHAPED = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
+SECRET_PLACEHOLDER = "[encoded value]"
 INSERT_RECORD = (
     f"INSERT INTO decision_records ({', '.join(FIELDS)}, prev_hash, hash)"
     f" VALUES ({', '.join(['%s'] * (len(FIELDS) + 2))})"
@@ -88,6 +93,12 @@ def mask_text(text: str, policies: list[Policy]) -> str:
             masked = replace_spans(masked, counted_spans(compiled, masked), placeholder)
         else:
             masked = compiled.sub(lambda match: placeholder, masked)
+    masked = SECRET_SHAPED.sub(
+        lambda run: SECRET_PLACEHOLDER
+        if any(char.isdigit() for char in run.group()) and any(char.isalpha() for char in run.group())
+        else run.group(),
+        masked,
+    )
     # A value only a normalized view shows (encoded, or split by invisible characters)
     # cannot be cut out of the raw text, so the whole piece is withheld.
     hidden = [policy.code for policy in policies if pattern_matches(policy.params["pattern"], text_views([masked]))]

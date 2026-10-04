@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, Outlet, useLocation } from "react-router";
+import { Outlet, useLocation } from "react-router";
+import { useAuth, useUser } from "../auth";
 import { CONSOLE_PAGES } from "../pages";
 import { Icon } from "./Icon";
 import { Sidebar } from "./Sidebar";
 import { ThemeToggle, type ThemeControlProps } from "./ThemeToggle";
-import { buttonVariants } from "./ui/Button";
+import { Button } from "./ui/Button";
 
 export function ConsoleLayout(themeControl: ThemeControlProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const { signOut } = useAuth();
+  const user = useUser();
   const { pathname } = useLocation();
   const mainRef = useRef<HTMLElement>(null);
   const previousPath = useRef(pathname);
@@ -28,7 +31,11 @@ export function ConsoleLayout(themeControl: ThemeControlProps) {
           <p className="header-location"><span>Console</span><span aria-hidden="true">/</span><span>{title}</span></p>
           <div className="header-actions">
             <ThemeToggle {...themeControl} />
-            <Link to="/login" className={buttonVariants({ variant: "outline" })}><Icon name="login" />Sign in</Link>
+            <p className="header-user">
+              <span className="header-username">{user.username}</span>
+              <span className="role-badge">{user.role}</span>
+            </p>
+            <Button variant="outline" onClick={() => void signOut()}><Icon name="logout" />Sign out</Button>
           </div>
         </header>
         <main id="main-content" className="console-content" ref={mainRef} tabIndex={-1}>

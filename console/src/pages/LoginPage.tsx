@@ -1,28 +1,35 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Link } from "react-router";
+import { Navigate, useLocation } from "react-router";
+import { useAuth } from "../auth";
 import { BrandMark } from "../components/BrandMark";
 import { Icon } from "../components/Icon";
 import { ThemeToggle, type ThemeControlProps } from "../components/ThemeToggle";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
+import { ApiError, errorMessage } from "../lib/api";
 
 type FieldErrors = { username?: string; password?: string };
 
-function LoginForm() {
+function LoginForm({ expired }: { expired: boolean }) {
+  const { signIn } = useAuth();
   const usernameRef = useRef<HTMLInputElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [errors, setErrors] = useState<FieldErrors>({});
-  const [feedback, setFeedback] = useState("");
+  const [feedback, setFeedback] = useState(expired ? "Your session has ended. Sign in again." : "");
+  const [failed, setFailed] = useState(false);
+  const [pending, setPending] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
   function clearFeedback(field: keyof FieldErrors) {
     setErrors((previous) => ({ ...previous, [field]: undefined }));
     setFeedback("");
+    setFailed(false);
   }
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (pending) return;
     setAttempt((previous) => previous + 1);
     const nextErrors: FieldErrors = {};
     if (!usernameRef.current?.value.trim()) nextErrors.username = "Enter a username.";
@@ -30,10 +37,24 @@ function LoginForm() {
     setErrors(nextErrors);
     if (nextErrors.username || nextErrors.password) {
       setFeedback("Check the required fields.");
+      setFailed(true);
       (nextErrors.username ? usernameRef : passwordRef).current?.focus();
       return;
     }
-    setFeedback("Sign-in is unavailable.");
+    setPending(true);
+    setFeedback("");
+    try {
+      // On success the session changes and LoginPage navigates away.
+      await signIn(usernameRef.current!.value.trim(), passwordRef.current!.value);
+    } catch (error) {
+      setPending(false);
+      setFailed(true);
+      setFeedback(error instanceof ApiError && error.code === "invalid_request"
+        ? "The username or password is incorrect."
+        : errorMessage(error));
+      passwordRef.current!.value = "";
+      passwordRef.current!.focus();
+    }
   }
 
   return (
@@ -53,20 +74,25 @@ function LoginForm() {
         </div>
         {errors.password && <p id="password-error" className="field-error">{errors.password}</p>}
       </div>
-      <Button type="submit" className="login-submit">Sign in<Icon name="login" /></Button>
-      <div role="status" aria-live="polite" aria-atomic="true" className={feedback ? "login-feedback" : undefined}>{feedback && <span key={attempt}>{feedback}</span>}</div>
+      <Button type="submit" className="login-submit" disabled={pending}>{pending ? "Signing in…" : <>Sign in<Icon name="login" /></>}</Button>
+      <div role="status" aria-live="polite" aria-atomic="true" className={feedback ? `login-feedback${failed ? " is-error" : ""}` : undefined}>{feedback && <span key={attempt}>{feedback}</span>}</div>
     </form>
   );
 }
 
 export function LoginPage(themeControl: ThemeControlProps) {
+  const { session } = useAuth();
+  const from = (useLocation().state as { from?: string } | null)?.from;
   useEffect(() => { document.title = "Sign in | IntentLatch Console"; }, []);
+
+  if (session.status === "signed-in") {
+    return <Navigate to={from && from.startsWith("/") && !from.startsWith("/login") ? from : "/metrics"} replace />;
+  }
 
   return (
     <div className="login-page">
       <a href="#login-content" className="skip-link">Skip to sign-in form</a>
       <header className="login-controls">
-        <Link to="/metrics" className="back-link"><Icon name="collapse" />Back to console</Link>
         <ThemeToggle {...themeControl} />
       </header>
       <main id="login-content" className="login-main" tabIndex={-1}>
@@ -78,7 +104,7 @@ export function LoginPage(themeControl: ThemeControlProps) {
                 <h1 id="login-title">IntentLatch Console</h1>
                 <p>Sign in to the management console</p>
               </div>
-              <LoginForm />
+              <LoginForm expired={session.status === "signed-out" && session.expired} />
             </div>
             <footer className="login-footer">No default accounts. Ask an administrator for access.</footer>
           </section>
