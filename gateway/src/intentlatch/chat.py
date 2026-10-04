@@ -1,9 +1,12 @@
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import PydanticCustomError
+
+UNENCODABLE = "the body must be plain JSON: no NaN or Infinity numbers and no unpaired surrogate characters"
 
 
 class Message(BaseModel):
@@ -19,6 +22,16 @@ class ChatRequest(BaseModel):
 
     model: str
     messages: list[Message] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _forwardable(self) -> Self:
+        # The parser accepts NaN, Infinity and lone surrogate escapes, but the body is re-encoded as
+        # strict UTF-8 JSON for the corporate LLM and the control agent, so it is refused here, not with a 500.
+        try:
+            json.dumps(self.model_dump(), ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except ValueError:
+            raise PydanticCustomError("chat_body", UNENCODABLE) from None
+        return self
 
 
 def allowlisted(data: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:

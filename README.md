@@ -111,6 +111,10 @@ curl -s localhost:8080/v1/chat/completions -H "Authorization: Bearer $TOKEN" \
   -d '{"model": "corporate-a", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
+A chat body that cannot be passed on as plain JSON, for example one with a `NaN`
+or `Infinity` number or an unpaired surrogate escape such as `\ud800`, answers
+400 `invalid_request` before any policy runs.
+
 ## Check what a token may do
 
 Any system can ask what a token is allowed to do. The answer comes from the

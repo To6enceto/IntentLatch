@@ -1,6 +1,56 @@
-import pytest
+import json
 
-from intentlatch.chat import Piece, apply_rewrites, message_pieces, message_texts, prompt_pieces, prompt_texts
+import pytest
+from pydantic import ValidationError
+
+from intentlatch.chat import (
+    UNENCODABLE,
+    Piece,
+    apply_rewrites,
+    message_pieces,
+    message_texts,
+    prompt_pieces,
+    prompt_texts,
+)
+from intentlatch.errors import describe_validation_error
+from intentlatch.routes.ollama import OllamaChatRequest
+from intentlatch.routes.openai import OpenAIChatRequest
+
+BODIES = (OpenAIChatRequest, OllamaChatRequest)
+
+
+@pytest.mark.parametrize("body", BODIES)
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"model": "corporate-a", "messages": [{"role": "user", "content": "\\ud800"}]}',
+        '{"model": "corporate-a", "messages": [{"role": "user", "content": "key \\udfff here"}]}',
+        '{"model": "corporate-a", "messages": [{"role": "user", "content": "Hi", "name": "\\ud83d"}]}',
+        '{"model": "corporate-a", "messages": [{"role": "user", "content": "Hi"}], "temperature": NaN}',
+        '{"model": "corporate-a", "messages": [{"role": "user", "content": "Hi"}], "options": {"temperature": Infinity}}',
+        '{"model": "corporate-a", "messages": [{"role": "user", "content": [{"type": "text", "text": "\\udc00"}]}]}',
+        '{"model": "corporate-a", "messages": [{"role": "user", "content": "Hi"}], "seed": -Infinity}',
+    ],
+)
+def test_bodies_that_cannot_be_passed_on_are_rejected(body, raw):
+    # json.loads reads these the way the server does: NaN, Infinity and lone surrogates all parse.
+    with pytest.raises(ValidationError) as caught:
+        body.model_validate(json.loads(raw))
+    assert describe_validation_error(caught.value) == UNENCODABLE
+
+
+@pytest.mark.parametrize("body", BODIES)
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"model": "corporate-a", "messages": [{"role": "user", "content": "Zażółć gęślą jaźń \\ud83d\\ude00"}]}',
+        '{"model": "corporate-a", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi"}]}], "temperature": 0.2}',
+        '{"model": "corporate-a", "messages": [{"role": "user", "content": "Hi"}], "options": {"temperature": 1e3, "seed": 7}}',
+    ],
+)
+def test_plain_json_bodies_pass(body, raw):
+    request = body.model_validate(json.loads(raw))
+    assert request.model_dump(exclude_unset=True) == json.loads(raw)
 
 
 def test_string_content_is_one_piece():
