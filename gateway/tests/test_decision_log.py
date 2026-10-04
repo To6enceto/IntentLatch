@@ -9,14 +9,12 @@ from intentlatch.decision_log import (
     GENESIS,
     canonical,
     chain,
-    counted_spans,
     mask_text,
     record_hash,
     records,
-    replace_spans,
 )
 from intentlatch.identity import Identity
-from intentlatch.pipeline import Decision, PolicyResult
+from intentlatch.pipeline import Decision, PolicyResult, counted_spans, replace_spans
 from intentlatch.policies import SNAPSHOT_FIELDS, Policy, PolicySnapshot, load_seeds
 from intentlatch.trace import Stage, Trace
 

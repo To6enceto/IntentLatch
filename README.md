@@ -398,21 +398,24 @@ curl -s localhost:8080/v1/chat/completions -H "Authorization: Bearer $TOKEN" \
 
 An AI policy is a rule in plain language that the control agent (Qwen2.5 3B on
 Ollama) checks. The gateway calls the agent at most once per direction, and only
-when an AI policy applies to that direction or an `edit` regex policy matched.
-Authority, limit and `block` regex violations end the request before it. The
-agent gets the text pieces, the verified identity (employee, team and authorized
-models, never the token), the AI policies and the values the `edit` regex
-policies matched. It answers `pass`, `blocked` or `modified`, with a rewrite of
-every piece when it changed something.
+when an AI policy applies to that direction. Authority, limit and `block` regex
+violations end the request before it. The agent gets the text pieces with every
+`edit` regex match already cut out, the verified identity (employee, team and
+authorized models, never the token) and the AI policies. It answers `pass`,
+`blocked` or `modified`, with a rewrite of every piece when an AI `edit` policy
+needs one.
 
-The gateway applies each violated policy's own action, whatever the agent's
-status says:
+The gateway itself replaces each `edit` regex match with `[removed]`; a 3B model
+rewrites unreliably and, shown personal data, tends to report it as a
+credential. The gateway then applies each violated policy's own action, whatever
+the agent's status says:
 
 - **Block.** A violated `block` policy blocks with 403 `policy_blocked`.
 - **Edit.** A violated `edit` policy forwards the rewritten prompt, or returns
   the rewritten answer (as JSON or replayed as a stream). Just before that, the
-  matched `edit` regex policies run again on the rewrite; if one still matches,
-  the request is blocked under that policy's code.
+  matched `edit` regex policies run again on the rewrite; if one still matches
+  (for example a value that was only there Base64 encoded), the request is
+  blocked under that policy's code.
 - **Tools.** Tool-call arguments and tool definitions are never rewritten, so an
   `edit` match there blocks through that re-check.
 

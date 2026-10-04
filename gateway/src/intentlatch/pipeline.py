@@ -19,6 +19,8 @@ from .trace import Stage
 
 log = logging.getLogger("intentlatch")
 
+REDACTED = "[removed]"
+
 Result = Literal["pass", "violated", "error"]
 Outcome = Literal["allowed", "edited", "blocked"]
 Direction = Literal["prompt", "response"]
@@ -131,16 +133,30 @@ def pattern_matches(pattern: str, views: list[str]) -> bool:
     return any(luhn_counted(match) for view in views for match in compiled.finditer(view))
 
 
-def pattern_values(pattern: str, views: list[str]) -> list[str]:
+def counted_spans(compiled: re.Pattern[str], text: str) -> list[tuple[int, int]]:
+    """The spans of checksum-valid captures, merged where they touch or overlap."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(matched_span(match) for match in compiled.finditer(text) if luhn_counted(match)):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def replace_spans(text: str, spans: list[tuple[int, int]], placeholder: str) -> str:
+    pieces, last = [], 0
+    for start, end in spans:
+        pieces += [text[last:start], placeholder]
+        last = end
+    return "".join(pieces) + text[last:]
+
+
+def replace_matches(text: str, pattern: str, placeholder: str) -> str:
     compiled = re.compile(pattern)
-    counted = "luhn" in compiled.groupindex
-    found = [
-        view[slice(*matched_span(match))]
-        for view in views
-        for match in compiled.finditer(view)
-        if not counted or luhn_counted(match)
-    ]
-    return list(dict.fromkeys(found))
+    if "luhn" in compiled.groupindex:
+        return replace_spans(text, counted_spans(compiled, text), placeholder)
+    return compiled.sub(lambda match: placeholder, text)
 
 
 def text_views(texts: list[str]) -> list[str]:
@@ -190,23 +206,27 @@ def applying_ai_policies(snapshot: PolicySnapshot, direction: Direction) -> list
 
 
 def needs_agent(snapshot: PolicySnapshot, results: list[PolicyResult], direction: Direction) -> bool:
-    # A block ends the request before the agent; otherwise it runs for AI policies or edit matches.
+    # A block ends the request before the agent, and the gateway cuts edit regex matches itself.
     if blocking(results):
         return False
-    return bool(applying_ai_policies(snapshot, direction) or violated_edits(results))
+    return bool(applying_ai_policies(snapshot, direction))
 
 
-def edit_matches(
-    snapshot: PolicySnapshot, results: list[PolicyResult], texts: list[str]
-) -> list[tuple[str, list[str]]]:
-    # The matched values go only to the control agent, which must remove them.
-    patterns = {policy.code: policy.params["pattern"] for policy in snapshot.policies if policy.kind == "regex"}
-    views = text_views(texts)
-    return [
-        (entry.code, pattern_values(patterns[entry.code], views))
-        for entry in violated_edits(results)
-        if entry.kind == "regex"
-    ]
+def redact(
+    snapshot: PolicySnapshot, results: list[PolicyResult], pieces: list[Piece], placeholder: str = REDACTED
+) -> list[str]:
+    """Each piece with every violated edit regex policy's matches replaced; tool text stays as it is."""
+    # Done by the gateway, not the control agent: a small model rewrites unreliably, and it then
+    # judges AI policies on text that no longer holds the personal data it tends to over-flag.
+    edited = {entry.code for entry in violated_edits(results) if entry.kind == "regex"}
+    patterns = [policy.params["pattern"] for policy in snapshot.policies if policy.code in edited]
+    texts = []
+    for piece in pieces:
+        text = piece.text
+        for pattern in patterns if piece.rewritable else []:
+            text = replace_matches(text, pattern, placeholder)
+        texts.append(text)
+    return texts
 
 
 def ai_results(
@@ -249,6 +269,35 @@ def recheck(
     ]
 
 
+def settle(
+    snapshot: PolicySnapshot,
+    results: list[PolicyResult],
+    pieces: list[Piece],
+    texts: list[str],
+    direction: Direction,
+    status: AgentStatus,
+) -> Decision:
+    """Applies the edits when nothing blocks; a matched edit regex left anywhere still blocks."""
+    version = snapshot.version
+    edits = violated_edits(results)
+    if not edits:
+        return Decision(outcome="allowed", policy_version=version, policy_results=results, control_agent_status=status)
+    # Tool text keeps its original form, so an edit match left there blocks below.
+    final = [text if piece.rewritable else piece.text for piece, text in zip(pieces, texts, strict=True)]
+    remaining = recheck(snapshot, edits, final)
+    if remaining:
+        still = f"The rewritten {direction} still matches this policy's pattern."
+        results = [entry.model_copy(update={"reasoning": still}) if entry.code in remaining else entry for entry in results]
+        return Decision(
+            outcome="blocked", policy_version=version, policy_results=results,
+            control_agent_status=status, responsible=remaining,
+        )
+    return Decision(
+        outcome="edited", policy_version=version, policy_results=results, rewritten="\n\n".join(final),
+        control_agent_status=status, responsible=codes(edits), rewrites=final,
+    )
+
+
 def conclude(
     snapshot: PolicySnapshot,
     results: list[PolicyResult],
@@ -269,8 +318,8 @@ def conclude(
             outcome="blocked", policy_version=version, policy_results=results,
             control_agent_status=status, responsible=codes(blocked),
         )
-    edits = violated_edits(results)
-    if verdict is not None and edits and verdict.rewritten is None:
+    ai_edits = [entry for entry in violated_edits(results) if entry.ai]
+    if verdict is not None and ai_edits and verdict.rewritten is None:
         failure, status = "missing_rewrite", "error"
     if failure is not None:
         # Fail closed in production; development lets the text through unchanged.
@@ -278,25 +327,9 @@ def conclude(
             outcome="blocked" if production else "allowed", policy_version=version, policy_results=results,
             control_agent_status="error", agent_failure=failure,
         )
-    if not edits:
-        return Decision(outcome="allowed", policy_version=version, policy_results=results, control_agent_status=status)
-    # Tool-call arguments keep their original text, so an edit match left there blocks below.
-    final = [
-        rewrite if piece.rewritable else piece.text
-        for piece, rewrite in zip(pieces, verdict.rewritten, strict=True)
-    ]
-    remaining = recheck(snapshot, edits, final)
-    if remaining:
-        still = f"The rewritten {direction} still matches this policy's pattern."
-        results = [entry.model_copy(update={"reasoning": still}) if entry.code in remaining else entry for entry in results]
-        return Decision(
-            outcome="blocked", policy_version=version, policy_results=results,
-            control_agent_status=status, responsible=remaining,
-        )
-    return Decision(
-        outcome="edited", policy_version=version, policy_results=results, rewritten="\n\n".join(final),
-        control_agent_status=status, responsible=codes(edits), rewrites=final,
-    )
+    # The agent saw the redacted pieces, so its rewrite never brings a regex match back.
+    texts = verdict.rewritten if ai_edits else redact(snapshot, results, pieces)
+    return settle(snapshot, results, pieces, texts, direction, status)
 
 
 def finish(
@@ -309,12 +342,13 @@ def finish(
     latency_ms: float = 0.0,
     production: bool = True,
 ) -> Decision:
-    if not needs_agent(snapshot, results, direction):
-        blocked = blocking(results)
+    blocked = blocking(results)
+    if blocked:
         return Decision(
-            outcome="blocked" if blocked else "allowed", policy_version=snapshot.version,
-            policy_results=results, responsible=codes(blocked),
+            outcome="blocked", policy_version=snapshot.version, policy_results=results, responsible=codes(blocked)
         )
+    if not needs_agent(snapshot, results, direction):
+        return settle(snapshot, results, pieces, redact(snapshot, results, pieces), direction, "skipped")
     if verdict is None and failure is None:
         raise ValueError("the control agent's verdict or failure is required")
     return conclude(snapshot, results, pieces, direction, verdict, failure, latency_ms, production)
@@ -427,8 +461,8 @@ async def judged(
         direction,
         request.state.identity,
         applying_ai_policies(snapshot, direction),
-        edit_matches(snapshot, results, texts),
-        texts,
+        # Cut without a marker: the small model reads [removed] as a hidden credential.
+        redact(snapshot, results, pieces, placeholder=""),
     )
     started = time.perf_counter()
     verdict, failure, seconds = None, None, 0.0

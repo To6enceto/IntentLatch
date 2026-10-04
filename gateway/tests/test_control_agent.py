@@ -34,28 +34,20 @@ AI = Policy(
 
 
 def body(texts: list[str]) -> dict:
-    return agent_request("prompt", IDENTITY, [AI], [("RGX-EMAIL", ["a@b.pl"])], texts)
+    return agent_request("prompt", IDENTITY, [AI], texts)
 
 
 def verdict(**fields) -> str:
     return json.dumps({"status": "pass", "violations": [], **fields})
 
 
-def test_request_carries_identity_policies_matches_and_texts():
+def test_request_carries_identity_policies_and_texts_only():
     assert body(["one", "two"]) == {
         "direction": "prompt",
         "identity": {"employee": "Ana", "team": "Payments", "authorized_models": ["corporate-a"]},
         "policies": [{"code": "AI-NO-CREDENTIALS", "text": "No credentials.", "action": "block"}],
-        "matches": [{"code": "RGX-EMAIL", "values": ["a@b.pl"]}],
         "texts": ["one", "two"],
     }
-
-
-def test_request_caps_match_values():
-    request = agent_request("response", IDENTITY, [], [("RGX-X", ["v" * 300] * 12)], ["t"])
-    [match] = request["matches"]
-    assert len(match["values"]) == 10
-    assert all(len(value) == 200 for value in match["values"])
 
 
 def test_valid_verdict_normalizes_codes_and_caps_reasoning():
@@ -98,10 +90,10 @@ def test_unparseable_verdicts_fail(content):
     [({"status": "modified"}, 1), ({"status": "modified", "rewritten": ["a"]}, 2), ({"rewritten": ["a", "b"]}, 1)],
     ids=["modified-without-rewrite", "too-few", "too-many"],
 )
-def test_a_missing_or_wrong_length_rewrite_fails(fields, pieces):
-    with pytest.raises(AgentFailure) as caught:
-        parse_verdict(verdict(**fields), pieces)
-    assert caught.value.reason == "missing_rewrite"
+def test_a_missing_or_wrong_length_rewrite_is_dropped_not_failed(fields, pieces):
+    # Only an edit policy needs a rewrite, and the pipeline fails the request then.
+    parsed = parse_verdict(verdict(**fields), pieces)
+    assert parsed.rewritten is None
 
 
 async def run(handler, texts: list[str] | None = None):

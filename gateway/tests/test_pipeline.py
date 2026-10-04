@@ -14,13 +14,13 @@ from intentlatch.pipeline import (
     agent_failed_error,
     authority_result,
     blocked_error,
-    edit_matches,
     evaluate_prompt,
     evaluate_response,
     first_stages,
     luhn_valid,
     pattern_matches,
-    pattern_values,
+    redact,
+    replace_matches,
 )
 from intentlatch.policies import Policy, PolicySnapshot, load_seeds
 
@@ -199,15 +199,31 @@ def test_the_agent_stage_needs_a_verdict_or_a_failure():
         prompt(ai("AI-X"), texts=["hi"])
 
 
-def test_edit_matches_carry_every_distinct_value_including_decoded_ones():
+def test_redaction_cuts_every_violated_edit_regex_out_of_rewritable_pieces():
     encoded = base64.b64encode(b"ola@firma.pl").decode()
-    policies = (regex("RGX-MAIL", MAIL, action="edit"), regex("RGX-CARD", CARD_PATTERN, action="edit"))
-    texts = ["jan@firma.pl and jan@firma.pl", encoded, "4111 1111 1111 1112 and 4111 1111 1111 1111"]
-    results = first_stages(snapshot(*policies), IDENTITY, "corporate-a", texts, {})
-    assert edit_matches(snapshot(*policies), results, texts) == [
-        ("RGX-MAIL", ["jan@firma.pl", "ola@firma.pl"]),
-        ("RGX-CARD", ["4111 1111 1111 1111"]),
+    policies = snapshot(regex("RGX-MAIL", MAIL, action="edit"), regex("RGX-CARD", CARD_PATTERN, action="edit"))
+    pieces = [
+        Piece("jan@firma.pl and jan@firma.pl", True),
+        Piece(encoded, True),
+        Piece("4111 1111 1111 1112 and 4111 1111 1111 1111", True),
+        Piece('{"to": "jan@firma.pl"}', False),
     ]
+    results = first_stages(policies, IDENTITY, "corporate-a", [piece.text for piece in pieces], {})
+    # An encoded value cannot be cut out of the raw text; the re-check blocks it later.
+    assert redact(policies, results, pieces) == [
+        "[removed] and [removed]",
+        encoded,
+        "4111 1111 1111 1112 and [removed]",
+        '{"to": "jan@firma.pl"}',
+    ]
+    assert redact(policies, results, pieces[:1], placeholder="") == [" and "]
+
+
+def test_redaction_only_uses_violated_edit_policies():
+    policies = snapshot(regex("RGX-MAIL", MAIL, action="edit"), regex("RGX-OFF", "jan", action="edit"))
+    pieces = [Piece("mail jan@firma.pl", True)]
+    results = [entry for entry in first_stages(policies, IDENTITY, "corporate-a", ["mail jan@firma.pl"], {}) if entry.code == "RGX-MAIL"]
+    assert redact(policies, results, pieces) == ["mail [removed]"]
 
 
 def with_tool(content: str, description: str) -> dict:
@@ -257,16 +273,16 @@ SEEDED_CARD = next(seed for seed in load_seeds() if seed.code == "RGX-CARD").par
 
 
 @pytest.mark.parametrize(
-    "text",
-    ["pay 4111 1111 1111 1111 12/26 now", "from 2345 4111 1111 1111 1111", "card 4111 1111 1111 1111 123"],
+    ("text", "redacted"),
+    [
+        ("pay 4111 1111 1111 1111 12/26 now", "pay [removed] 12/26 now"),
+        ("from 2345 4111 1111 1111 1111", "from 2345 [removed]"),
+        ("card 4111 1111 1111 1111 123", "card [removed] 123"),
+        ("not 4111 1111 1111 1112 12/26", "not 4111 1111 1111 1112 12/26"),
+    ],
 )
-def test_a_lookahead_pattern_hands_the_agent_its_luhn_capture(text):
-    assert pattern_values(SEEDED_CARD, [text]) == ["4111 1111 1111 1111"]
-
-
-def test_a_lookahead_pattern_without_a_valid_capture_has_no_values():
-    assert pattern_values(SEEDED_CARD, ["4111 1111 1111 1112 12/26"]) == []
-    assert pattern_values(r"(?=(?P<other>\d{4}))", ["1234"]) == [""]
+def test_a_lookahead_luhn_pattern_replaces_only_the_card_digits(text, redacted):
+    assert replace_matches(text, SEEDED_CARD, "[removed]") == redacted
 
 
 def test_limit_passes_below_max_tokens():
@@ -353,23 +369,15 @@ def test_regex_block_match_blocks():
     assert (result.result, result.reasoning) == ("violated", PROMPT_REASON)
 
 
-def test_a_regex_edit_with_a_clean_rewrite_is_edited():
-    decision = prompt(
-        regex("RGX-MAIL", MAIL, action="edit"),
-        texts=["mail jan@firma.pl now"],
-        verdict=verdict("modified", [("RGX-MAIL", "An email address.")], ["mail [removed] now"]),
-    )
+def test_a_regex_edit_is_cut_out_by_the_gateway_without_the_agent():
+    decision = prompt(regex("RGX-MAIL", MAIL, action="edit"), texts=["mail jan@firma.pl now"])
     assert (decision.outcome, decision.rewritten, decision.rewrites) == ("edited", "mail [removed] now", ["mail [removed] now"])
-    assert (decision.control_agent_status, decision.responsible) == ("modified", ["RGX-MAIL"])
+    assert (decision.control_agent_status, decision.responsible) == ("skipped", ["RGX-MAIL"])
     assert "rewrites" not in decision.model_dump() and "agent_failure" not in decision.model_dump()
 
 
 def test_an_edited_prompt_joins_its_pieces_for_the_rewritten_text():
-    decision = prompt(
-        regex("RGX-MAIL", MAIL, action="edit"),
-        texts=["first", "to jan@firma.pl"],
-        verdict=verdict("modified", [], ["first", "to [removed]"]),
-    )
+    decision = prompt(regex("RGX-MAIL", MAIL, action="edit"), texts=["first", "to jan@firma.pl"])
     assert (decision.outcome, decision.rewritten) == ("edited", "first\n\nto [removed]")
 
 
@@ -414,9 +422,17 @@ def test_an_ai_block_wins_over_an_edit():
     assert (decision.outcome, decision.responsible, decision.rewrites) == ("blocked", ["AI-B"], None)
 
 
-def test_an_edit_violation_without_a_rewrite_fails_as_a_missing_rewrite():
-    decision = prompt(regex("RGX-MAIL", MAIL, action="edit"), texts=["jan@firma.pl"], verdict=verdict("pass"))
+def test_an_ai_edit_without_a_rewrite_fails_as_a_missing_rewrite():
+    decision = prompt(ai("AI-TONE", action="edit"), texts=["hi"], verdict=verdict("modified", [("AI-TONE", "Rude.")]))
     assert (decision.outcome, decision.control_agent_status, decision.agent_failure) == ("blocked", "error", "missing_rewrite")
+
+
+def test_with_ai_policies_a_regex_edit_still_uses_the_gateway_redaction_not_the_agent_rewrite():
+    decision = prompt(
+        ai("AI-X"), regex("RGX-MAIL", MAIL, action="edit"), texts=["mail jan@firma.pl"],
+        verdict=verdict("pass", [], ["mail jan@firma.pl"]),
+    )
+    assert (decision.outcome, decision.rewrites, decision.control_agent_status) == ("edited", ["mail [removed]"], "pass")
 
 
 @pytest.mark.parametrize("reason", ["timeout", "unreachable", "unparseable", "missing_rewrite"])
@@ -566,11 +582,13 @@ def test_response_block_names_the_response_in_the_error():
 
 def test_a_response_edit_is_rewritten_and_rechecked_as_the_response():
     policies = (regex("RGX-MAIL", MAIL, action="edit"), regex("RGX-KEY", "AKIA"))
-    edited = response(*policies, texts=["write to jan@firma.pl"], verdict=verdict("modified", [], ["write to [removed]"]))
+    edited = response(*policies, texts=["write to jan@firma.pl"])
     assert (edited.outcome, edited.rewrites, edited.responsible) == ("edited", ["write to [removed]"], ["RGX-MAIL"])
-    still = response(*policies, texts=["write to jan@firma.pl"], verdict=verdict("modified", [], ["jan@firma.pl"]))
+    with_ai = (*policies, ai("AI-PROMISE", action="edit", applies_to="response"))
+    still = response(*with_ai, texts=["write to jan@firma.pl"], verdict=verdict("modified", [("AI-PROMISE", "A promise.")], ["jan@firma.pl"]))
+    assert (still.outcome, still.responsible) == ("blocked", ["RGX-MAIL"])
     assert still.policy_results[0].reasoning == "The rewritten response still matches this policy's pattern."
-    assert agent_failed_error(response(*policies, texts=["jan@firma.pl"], failure="timeout"), "response").message == (
+    assert agent_failed_error(response(*with_ai, texts=["jan@firma.pl"], failure="timeout"), "response").message == (
         "The control agent could not check this response (it timed out), so it was blocked."
     )
 

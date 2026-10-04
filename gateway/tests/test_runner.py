@@ -310,14 +310,9 @@ def test_predefined_block_cases_pass_against_the_seeded_policies(seed):
 
 
 @pytest.mark.parametrize("seed", [seed for seed in SEED_CASES if seed.expected != "BLOCK"], ids=lambda seed: seed.code)
-def test_predefined_edit_and_allow_cases_pass_only_with_a_faithful_agent(seed):
-    violations = [Violation(code=seed.expected_policy_code, reasoning="Sensitive.")] if seed.expected_policy_code else []
-    clean = seed.prompt
-    for value in seed.must_not_contain:
-        clean = clean.replace(value, "[removed]")
-    status = "modified" if violations else "pass"
-    faithful = Verdict(status=status, violations=violations, rewritten=[clean] if violations else None)
-    assert judge(seed, 200, answer(seed, faithful), 1.0).passed
-    if violations:
-        lazy = Verdict(status="modified", violations=violations, rewritten=[seed.prompt])
-        assert judge(seed, 200, answer(seed, lazy), 1.0).failure == "Expected EDIT, got BLOCK."
+def test_predefined_edit_and_allow_cases_pass_unless_the_agent_flags_a_block_policy(seed):
+    # The gateway cuts regex matches itself, so even a rewrite that keeps the value cannot undo the edit.
+    lazy = Verdict(status="modified", violations=[], rewritten=[seed.prompt])
+    assert judge(seed, 200, answer(seed, lazy), 1.0).passed
+    false_alarm = Verdict(status="blocked", violations=[Violation(code="AI-NO-CREDENTIALS", reasoning="Looks secret.")])
+    assert judge(seed, 200, answer(seed, false_alarm), 1.0).failure == f"Expected {seed.expected}, got BLOCK."

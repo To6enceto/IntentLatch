@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from intentlatch import policies
 from intentlatch.chat import Piece
-from intentlatch.control_agent import Verdict, Violation
+from intentlatch.control_agent import Verdict
 from intentlatch.errors import GatewayError, describe_validation_error
 from intentlatch.identity import Identity
 from intentlatch.pipeline import evaluate_prompt, first_stages
@@ -268,22 +268,15 @@ def test_block_seeds_are_blocked_by_exactly_their_policy(seed):
     assert (decision.outcome, decision.responsible) == ("blocked", [seed.expected_policy_code])
 
 
-def rewrite(seed: CaseCreate, text: str) -> Verdict:
-    violation = Violation(code=seed.expected_policy_code, reasoning="It contains a sensitive value.")
-    return Verdict(status="modified", violations=[violation], rewritten=[text])
-
-
 @pytest.mark.parametrize("seed", seeds_where(lambda s: s.expected == "EDIT"), ids=lambda s: s.code)
-def test_edit_seeds_violate_their_policy_and_need_a_clean_rewrite(seed):
+def test_edit_seeds_violate_their_policy_and_are_redacted_by_the_gateway(seed):
     assert violated(seed) == [seed.expected_policy_code]
     assert seed.must_not_contain and all(value in seed.prompt for value in seed.must_not_contain)
-    clean = seed.prompt
-    for value in seed.must_not_contain:
-        clean = clean.replace(value, "[removed]")
-    edited = evaluate(seed, verdict=rewrite(seed, clean))
-    assert (edited.outcome, edited.responsible, edited.rewritten) == ("edited", [seed.expected_policy_code], clean)
-    kept = evaluate(seed, verdict=rewrite(seed, seed.prompt))
-    assert (kept.outcome, kept.responsible) == ("blocked", [seed.expected_policy_code])
+    # Even an agent that hands the text back unchanged cannot keep the value in.
+    edited = evaluate(seed, verdict=Verdict(status="pass", violations=[], rewritten=[seed.prompt]))
+    assert (edited.outcome, edited.responsible) == ("edited", [seed.expected_policy_code])
+    assert "[removed]" in edited.rewritten
+    assert not any(value in edited.rewritten for value in seed.must_not_contain)
 
 
 @pytest.mark.parametrize("seed", seeds_where(lambda s: not non_ai(s)), ids=lambda s: s.code)
