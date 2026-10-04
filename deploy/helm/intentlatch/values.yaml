@@ -24,6 +24,16 @@ gateway:
     controlAgentModelEnvironmentVariable: ""
     failureModeEnvironmentVariable: ""
 
+# The console's static files, served on the api listener beside the gateway's /admin and /console APIs.
+console:
+  enabled: false
+  image: ""
+  tag: ""
+  replicas: 2
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {cpu: 200m, memory: 64Mi}
+
 postgres:
   enabled: true
   image: postgres:17.10-bookworm

@@ -1,7 +1,7 @@
 {
   "uid": "intentlatch-security",
   "title": "IntentLatch security",
-  "description": "Planned gateway metrics. Empty panels are expected until /metrics is implemented. Latency histogram shape must be confirmed with the gateway owner.",
+  "description": "Gateway metrics scraped from /metrics every 30 s. Latency histograms use buckets from 5 ms to 120 s, labelled by stage.",
   "schemaVersion": 39,
   "version": 1,
   "tags": [
@@ -31,7 +31,7 @@
         {
           "refId": "A",
           "expr": "sum by (policy_code, action, direction) (rate(intentlatch_policy_enforcements_total[5m]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "legendFormat": "{{policy_code}} {{action}} {{direction}}"
         }
       ],
       "fieldConfig": {
@@ -63,7 +63,7 @@
         {
           "refId": "A",
           "expr": "sum by (reason) (rate(intentlatch_auth_failures_total[5m]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "legendFormat": "{{reason}}"
         }
       ],
       "fieldConfig": {
@@ -94,8 +94,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(intentlatch_policy_checks_total[5m]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "expr": "sum by (result) (rate(intentlatch_policy_checks_total[5m]))",
+          "legendFormat": "{{result}}"
         }
       ],
       "fieldConfig": {
@@ -126,8 +126,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (outcome) (rate(intentlatch_control_agent_verdicts_total[5m]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "expr": "sum by (direction, status) (rate(intentlatch_control_agent_verdicts_total[5m]))",
+          "legendFormat": "{{direction}} {{status}}"
         }
       ],
       "fieldConfig": {
@@ -158,8 +158,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(intentlatch_control_agent_errors_total[5m]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "expr": "sum by (reason) (rate(intentlatch_control_agent_errors_total[5m]))",
+          "legendFormat": "{{reason}}"
         }
       ],
       "fieldConfig": {
@@ -190,8 +190,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(intentlatch_rewrite_rejections_total[5m]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "expr": "sum by (policy_code) (rate(intentlatch_rewrite_rejections_total[5m]))",
+          "legendFormat": "{{policy_code}}"
         }
       ],
       "fieldConfig": {

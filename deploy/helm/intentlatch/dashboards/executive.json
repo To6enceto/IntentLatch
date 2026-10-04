@@ -1,7 +1,7 @@
 {
   "uid": "intentlatch-executive",
   "title": "IntentLatch executive",
-  "description": "Planned gateway metrics. Empty panels are expected until /metrics is implemented. Latency histogram shape must be confirmed with the gateway owner.",
+  "description": "Gateway metrics scraped from /metrics every 30 s. Latency histograms use buckets from 5 ms to 120 s, labelled by stage.",
   "schemaVersion": 39,
   "version": 1,
   "tags": [
@@ -31,7 +31,7 @@
         {
           "refId": "A",
           "expr": "sum by (outcome) (rate(intentlatch_requests_total[5m]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "legendFormat": "{{outcome}}"
         }
       ],
       "fieldConfig": {
@@ -63,7 +63,7 @@
         {
           "refId": "A",
           "expr": "intentlatch_team_token_usage_ratio",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "legendFormat": "{{team}}"
         }
       ],
       "fieldConfig": {
@@ -95,7 +95,7 @@
         {
           "refId": "A",
           "expr": "sum(increase(intentlatch_tokens_total[$__range]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "legendFormat": "tokens"
         }
       ],
       "fieldConfig": {
@@ -127,7 +127,7 @@
         {
           "refId": "A",
           "expr": "sum(increase(intentlatch_compute_seconds_total[$__range]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "legendFormat": "compute seconds"
         }
       ],
       "fieldConfig": {
@@ -159,7 +159,7 @@
         {
           "refId": "A",
           "expr": "intentlatch_policies_active",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "legendFormat": "{{kind}}"
         }
       ],
       "fieldConfig": {

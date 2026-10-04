@@ -1,7 +1,7 @@
 {
   "uid": "intentlatch-performance",
   "title": "IntentLatch performance",
-  "description": "Planned gateway metrics. Empty panels are expected until /metrics is implemented. Latency histogram shape must be confirmed with the gateway owner.",
+  "description": "Gateway metrics scraped from /metrics every 30 s. Latency histograms use buckets from 5 ms to 120 s, labelled by stage.",
   "schemaVersion": 39,
   "version": 1,
   "tags": [
@@ -31,7 +31,7 @@
         {
           "refId": "A",
           "expr": "sum by (model) (rate(intentlatch_requests_total[5m]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "legendFormat": "{{model}}"
         }
       ],
       "fieldConfig": {
@@ -47,7 +47,7 @@
     },
     {
       "id": 2,
-      "title": "p95 stage latency (assumes histogram)",
+      "title": "p95 stage latency",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -63,7 +63,7 @@
         {
           "refId": "A",
           "expr": "histogram_quantile(0.95, sum by (le, stage) (rate(intentlatch_request_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "legendFormat": "{{stage}}"
         }
       ],
       "fieldConfig": {
@@ -94,8 +94,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(intentlatch_upstream_errors_total[5m]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "expr": "sum by (reason) (rate(intentlatch_upstream_errors_total[5m]))",
+          "legendFormat": "{{reason}}"
         }
       ],
       "fieldConfig": {
@@ -127,7 +127,7 @@
         {
           "refId": "A",
           "expr": "sum(rate(intentlatch_compute_seconds_total[5m]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "legendFormat": "compute seconds per second"
         }
       ],
       "fieldConfig": {
@@ -158,8 +158,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (outcome) (increase(intentlatch_test_cases_total[$__range]))",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "expr": "sum by (result) (increase(intentlatch_test_cases_total[$__range]))",
+          "legendFormat": "{{result}}"
         }
       ],
       "fieldConfig": {
@@ -191,7 +191,7 @@
         {
           "refId": "A",
           "expr": "up{namespace=\"intentlatch-system\",service=\"intentlatch-gateway\"}",
-          "legendFormat": "{{__name__}} {{team}} {{model}} {{outcome}} {{stage}}"
+          "legendFormat": "{{pod}}"
         }
       ],
       "fieldConfig": {

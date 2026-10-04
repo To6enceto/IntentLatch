@@ -59,6 +59,10 @@ spec:
             - {name: INTENTLATCH_MODEL_B, value: "llama3.2:1b"}
             - name: INTENTLATCH_UPSTREAM_TIMEOUT_SECONDS
               value: {{ .Values.gateway.upstreamTimeoutSeconds | quote }}
+            {{- if .Values.monitoring.enabled }}
+            - name: INTENTLATCH_PROMETHEUS_URL
+              value: "http://{{ .Values.monitoring.release }}-prometheus.observability.svc.cluster.local:9090"
+            {{- end }}
           readinessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 10

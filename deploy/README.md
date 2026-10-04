@@ -8,9 +8,43 @@ The FRA1 installation was completed on 4 October 2026. See
 [live validation and login instructions](live-validation.md) for the tested
 state, localhost access, and remaining limits.
 
-The live gateway image remains pinned to source commit `b1b0289`, recorded in
-`image-build.json`. Later gateway policy features pulled into this repository
-have not yet been built and deployed; the live reports describe the pinned image.
+## Live state since 4 October, 07:20
+
+The current gateway (policies, control agent, decision log, metrics, test
+runner, reports, console APIs) and the console run in the cluster, deployed as
+Helm revision 21 of `intentlatch`:
+
+- **Console** on `https://<edge-ip>:9443/`, the same origin as the API. The
+  `api` route sends `/v1`, `/api`, `/authority`, `/check`, `/healthz`, `/admin`
+  and `/console` to the gateway, and the `console` route sends everything else
+  to `intentlatch-console` (nginx serving the built console,
+  `docker/console.Dockerfile`). Console accounts: `admin` (admin) and `judge`
+  (analyst); their passwords are in the `intentlatch-system/console-accounts`
+  Secret. Add more with
+  `kubectl -n intentlatch-system exec -it deploy/intentlatch-gateway -- intentlatch console-user create <name> --role viewer|analyst|admin`.
+- **Metrics page** reads Prometheus through the gateway
+  (`INTENTLATCH_PROMETHEUS_URL`, set when `monitoring.enabled`).
+- **Images are temporary.** GHCR push rights were not available, so both images
+  were pushed to the anonymous registry `ttl.sh` and are pinned by digest in the
+  release values (`gateway.image`/`gateway.tag`, `console.image`/`console.tag`).
+  `ttl.sh` deletes them about 24 hours after the push (by 08:00 on 5 October),
+  after which a rescheduled pod cannot pull them. Before then, publish both to
+  GHCR and point the release at them:
+
+  ```bash
+  export IMAGE_TAG="$(git rev-parse HEAD)"
+  docker build --platform linux/amd64 -f deploy/docker/gateway.Dockerfile -t "ghcr.io/antonstwork/intentlatch-gateway:$IMAGE_TAG" .
+  docker build --platform linux/amd64 -f deploy/docker/console.Dockerfile -t "ghcr.io/antonstwork/intentlatch-console:$IMAGE_TAG" .
+  docker push "ghcr.io/antonstwork/intentlatch-gateway:$IMAGE_TAG"
+  docker push "ghcr.io/antonstwork/intentlatch-console:$IMAGE_TAG"   # then make the package public
+  helm --kube-context do-fra1-hackyeah-cluster upgrade intentlatch deploy/helm/intentlatch -n default \
+    --reset-then-reuse-values --set gateway.image=ghcr.io/antonstwork/intentlatch-gateway \
+    --set gateway.tag="$IMAGE_TAG" --set console.image=ghcr.io/antonstwork/intentlatch-console \
+    --set console.tag="$IMAGE_TAG" --wait --timeout 15m
+  ```
+
+  `make gateway` alone is not enough now: it changes only `gateway.tag`, so it
+  would pair the `ttl.sh` repository with a GHCR tag.
 
 For an explanation of every component, Kubernetes resource type, communication
 path, and technology, read the [cluster architecture guide](cluster-guide.md).

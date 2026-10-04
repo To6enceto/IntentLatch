@@ -135,9 +135,31 @@ spec:
         - path: {type: PathPrefix, value: /v1}
         - path: {type: PathPrefix, value: /api}
         - path: {type: Exact, value: /authority}
+        - path: {type: Exact, value: /check}
         - path: {type: Exact, value: /healthz}
+        # The console's own APIs: admin key or console session, checked by the gateway.
+        - path: {type: PathPrefix, value: /admin}
+        - path: {type: PathPrefix, value: /console}
       timeouts: {request: 360s, backendRequest: 360s}
       backendRefs: [{name: intentlatch-gateway, port: 8080}]
+{{- if .Values.console.enabled }}
+---
+# Same origin as /admin and /console, so the console's session cookie reaches the gateway.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: console
+  namespace: intentlatch-system
+spec:
+  parentRefs: [{name: intentlatch, namespace: envoy-gateway-system, sectionName: api}]
+  {{- if not $ipMode }}
+  hostnames: [{{ printf "api.%s" $domain | quote }}]
+  {{- end }}
+  rules:
+    - matches:
+        - path: {type: PathPrefix, value: /}
+      backendRefs: [{name: intentlatch-console, port: 8080}]
+{{- end }}
 ---
 # These are finite JSON request bodies, even when responses use SSE/NDJSON.
 apiVersion: gateway.envoyproxy.io/v1alpha1

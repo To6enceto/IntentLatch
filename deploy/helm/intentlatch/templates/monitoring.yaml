@@ -11,7 +11,6 @@ spec:
   selector:
     matchLabels: {app.kubernetes.io/name: intentlatch-gateway}
   endpoints:
-    # Expected to be DOWN/404 until the gateway implements /metrics.
     - {port: http, path: /metrics, interval: 30s, scrapeTimeout: 5s}
 ---
 apiVersion: monitoring.coreos.com/v1

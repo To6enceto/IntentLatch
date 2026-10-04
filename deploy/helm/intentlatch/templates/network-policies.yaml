@@ -70,6 +70,33 @@ spec:
           podSelector:
             matchLabels: {app.kubernetes.io/name: ollama}
       ports: [{protocol: TCP, port: 11434}]
+    {{- if .Values.monitoring.enabled }}
+    # The console's Metrics page reads Prometheus through the gateway.
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: observability}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: prometheus}
+      ports: [{protocol: TCP, port: 9090}]
+    {{- end }}
+{{- if .Values.console.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: console
+  namespace: intentlatch-system
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: intentlatch-console}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: envoy-gateway-system}
+      ports: [{protocol: TCP, port: 8080}]
+  egress: []
+{{- end }}
 {{- range $name, $port := dict "postgres" 5432 "valkey" 6379 }}
 ---
 apiVersion: networking.k8s.io/v1
