@@ -24,6 +24,12 @@ Helm revision 21 of `intentlatch`:
   `kubectl -n intentlatch-system exec -it deploy/intentlatch-gateway -- intentlatch console-user create <name> --role viewer|analyst|admin`.
 - **Metrics page** reads Prometheus through the gateway
   (`INTENTLATCH_PROMETHEUS_URL`, set when `monitoring.enabled`).
+- **Domain beside the IP** (Helm revision 22, `edge.domain=intentlatch.com` with
+  `edge.mode=ip`): hostname listeners on 443 serve `console.`, `api.`, `chat.`
+  and `grafana.intentlatch.com` with their own Let's Encrypt certificate
+  (`intentlatch-domain`), and `intentlatch.com` and `www` redirect to the
+  console. The IP ports keep working. Each name needs an A record to the edge
+  IP; the listeners stay unprogrammed until that certificate is issued.
 - **Images are temporary.** GHCR push rights were not available, so both images
   were pushed to the anonymous registry `ttl.sh` and are pinned by digest in the
   release values (`gateway.image`/`gateway.tag`, `console.image`/`console.tag`).

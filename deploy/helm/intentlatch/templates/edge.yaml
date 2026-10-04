@@ -9,6 +9,8 @@
 {{- $email = required "Set edge.acmeEmail before enabling edge" $email }}
 {{- end }}
 {{- $tlsReady := or (not $ipMode) (not (empty .Values.edge.publicIP)) }}
+{{- /* In IP mode a domain adds hostname listeners on 443 beside the IP ports, so both keep working. */}}
+{{- $alsoDomain := and $ipMode $tlsReady (not (empty $domain)) }}
 {{- if .Values.webui.enableSignup }}{{ fail "Bootstrap WebUI locally, then set webui.enableSignup=false before enabling edge" }}{{- end }}
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
@@ -89,6 +91,33 @@ spec:
             matchLabels: {intentlatch.io/managed: "true"}
     {{- end }}
     {{- end }}
+    {{- if $alsoDomain }}
+    {{- range $host := list "api" "console" "chat" "grafana" }}
+    - name: {{ $host }}-domain
+      hostname: {{ printf "%s.%s" $host $domain | quote }}
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs: [{name: intentlatch-domain-tls}]
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels: {intentlatch.io/managed: "true"}
+    {{- end }}
+    {{- range $name, $host := dict "apex" $domain "www" (printf "www.%s" $domain) }}
+    - name: {{ $name }}
+      hostname: {{ $host | quote }}
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs: [{name: intentlatch-domain-tls}]
+      allowedRoutes:
+        namespaces: {from: Same}
+    {{- end }}
+    {{- end }}
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: ClientTrafficPolicy
@@ -126,7 +155,12 @@ metadata:
   name: api
   namespace: intentlatch-system
 spec:
-  parentRefs: [{name: intentlatch, namespace: envoy-gateway-system, sectionName: api}]
+  parentRefs:
+    - {name: intentlatch, namespace: envoy-gateway-system, sectionName: api}
+    {{- if $alsoDomain }}
+    - {name: intentlatch, namespace: envoy-gateway-system, sectionName: api-domain}
+    - {name: intentlatch, namespace: envoy-gateway-system, sectionName: console-domain}
+    {{- end }}
   {{- if not $ipMode }}
   hostnames: [{{ printf "api.%s" $domain | quote }}]
   {{- end }}
@@ -151,7 +185,12 @@ metadata:
   name: console
   namespace: intentlatch-system
 spec:
-  parentRefs: [{name: intentlatch, namespace: envoy-gateway-system, sectionName: api}]
+  parentRefs:
+    - {name: intentlatch, namespace: envoy-gateway-system, sectionName: api}
+    {{- if $alsoDomain }}
+    - {name: intentlatch, namespace: envoy-gateway-system, sectionName: api-domain}
+    - {name: intentlatch, namespace: envoy-gateway-system, sectionName: console-domain}
+    {{- end }}
   {{- if not $ipMode }}
   hostnames: [{{ printf "api.%s" $domain | quote }}]
   {{- end }}
@@ -178,7 +217,11 @@ metadata:
   name: chat
   namespace: agents
 spec:
-  parentRefs: [{name: intentlatch, namespace: envoy-gateway-system, sectionName: chat}]
+  parentRefs:
+    - {name: intentlatch, namespace: envoy-gateway-system, sectionName: chat}
+    {{- if $alsoDomain }}
+    - {name: intentlatch, namespace: envoy-gateway-system, sectionName: chat-domain}
+    {{- end }}
   {{- if not $ipMode }}
   hostnames: [{{ printf "chat.%s" $domain | quote }}]
   {{- end }}
@@ -192,7 +235,11 @@ metadata:
   name: grafana
   namespace: observability
 spec:
-  parentRefs: [{name: intentlatch, namespace: envoy-gateway-system, sectionName: grafana}]
+  parentRefs:
+    - {name: intentlatch, namespace: envoy-gateway-system, sectionName: grafana}
+    {{- if $alsoDomain }}
+    - {name: intentlatch, namespace: envoy-gateway-system, sectionName: grafana-domain}
+    {{- end }}
   {{- if not $ipMode }}
   hostnames: [{{ printf "grafana.%s" $domain | quote }}]
   {{- end }}
@@ -239,5 +286,39 @@ spec:
   dnsNames: [{{ printf "api.%s" $domain | quote }}, {{ printf "chat.%s" $domain | quote }}, {{ printf "grafana.%s" $domain | quote }}]
   {{- end }}
   privateKey: {rotationPolicy: Always}
+{{- if $alsoDomain }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: intentlatch-domain
+  namespace: envoy-gateway-system
+spec:
+  secretName: intentlatch-domain-tls
+  issuerRef: {name: {{ .Values.edge.issuer }}, kind: ClusterIssuer}
+  dnsNames:
+    - {{ $domain | quote }}
+    {{- range $host := list "www" "api" "console" "chat" "grafana" }}
+    - {{ printf "%s.%s" $host $domain | quote }}
+    {{- end }}
+  duration: 160h
+  renewBefore: 48h
+  privateKey: {rotationPolicy: Always}
+---
+# The bare domain and www open the console.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: apex-redirect
+  namespace: envoy-gateway-system
+spec:
+  parentRefs:
+    - {name: intentlatch, sectionName: apex}
+    - {name: intentlatch, sectionName: www}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect: {scheme: https, hostname: {{ printf "console.%s" $domain | quote }}, statusCode: 302}
+{{- end }}
 {{- end }}
 {{- end }}
