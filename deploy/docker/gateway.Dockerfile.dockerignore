@@ -1,0 +1,7 @@
+**
+!gateway/
+!gateway/pyproject.toml
+!gateway/src/
+!gateway/src/**
+**/__pycache__/
+**/*.pyc

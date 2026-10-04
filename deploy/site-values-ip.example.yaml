@@ -1,0 +1,10 @@
+# Copy to site-values.yaml after creating the WebUI users locally.
+# make edge allocates one load balancer and records its IP here automatically.
+webui:
+  enableSignup: false
+edge:
+  mode: ip
+  publicIP: ""
+  issuer: letsencrypt-staging
+  # Match Envoy Gateway v1.9.2, including when upgrading older release values.
+  envoyImage: docker.io/envoyproxy/envoy:distroless-v1.39.1@sha256:eb2c01c13125d1629637cb4e4cce7207009fb7cc2c8027f9742758549d15b6f4

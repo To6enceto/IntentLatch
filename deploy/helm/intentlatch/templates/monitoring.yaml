@@ -1,0 +1,66 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: intentlatch-gateway
+  namespace: observability
+  labels: {release: {{ .Values.monitoring.release }}}
+spec:
+  namespaceSelector:
+    matchNames: [intentlatch-system]
+  selector:
+    matchLabels: {app.kubernetes.io/name: intentlatch-gateway}
+  endpoints:
+    # Expected to be DOWN/404 until the gateway implements /metrics.
+    - {port: http, path: /metrics, interval: 30s, scrapeTimeout: 5s}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: intentlatch
+  namespace: observability
+  labels: {release: {{ .Values.monitoring.release }}}
+spec:
+  groups:
+    - name: intentlatch.availability
+      rules:
+        - alert: IntentLatchGatewayNotReady
+          expr: (kube_deployment_status_replicas_available{namespace="intentlatch-system",deployment="intentlatch-gateway"} < kube_deployment_spec_replicas{namespace="intentlatch-system",deployment="intentlatch-gateway"}) or absent(kube_deployment_status_replicas_available{namespace="intentlatch-system",deployment="intentlatch-gateway"})
+          for: 2m
+          labels: {severity: critical}
+          annotations: {summary: Gateway replicas are unavailable}
+        - alert: IntentLatchOllamaNotReady
+          expr: kube_deployment_status_replicas_available{namespace="upstreams",deployment="ollama"} < 1 or absent(kube_deployment_status_replicas_available{namespace="upstreams",deployment="ollama"})
+          for: 2m
+          labels: {severity: critical}
+          annotations: {summary: Ollama is unavailable}
+        - alert: IntentLatchPostgresNotReady
+          expr: kube_statefulset_status_replicas_ready{namespace="intentlatch-data",statefulset="postgres"} < 1 or absent(kube_statefulset_status_replicas_ready{namespace="intentlatch-data",statefulset="postgres"})
+          for: 2m
+          labels: {severity: critical}
+          annotations: {summary: PostgreSQL is unavailable}
+    - name: intentlatch.future-budget
+      rules:
+        - alert: IntentLatchTeamBudgetWarning
+          expr: intentlatch_team_token_usage_ratio > 0.8 and intentlatch_team_token_usage_ratio < 1
+          for: 2m
+          labels: {severity: warning}
+          annotations: {summary: Team token usage exceeds 80 percent}
+        - alert: IntentLatchTeamBudgetExhausted
+          expr: intentlatch_team_token_usage_ratio >= 1
+          for: 1m
+          labels: {severity: critical}
+          annotations: {summary: Team token usage reached its limit}
+{{- end }}
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: intentlatch-{{ base $path | trimSuffix ".json" }}
+  namespace: observability
+  labels: {grafana_dashboard: "1"}
+data:
+  {{ base $path }}: |
+    {{- $.Files.Get $path | nindent 4 }}
+{{- end }}

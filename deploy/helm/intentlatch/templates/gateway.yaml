@@ -1,0 +1,102 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: intentlatch-gateway
+  namespace: intentlatch-system
+  labels:
+    {{- include "intentlatch.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels: {app.kubernetes.io/name: intentlatch-gateway}
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: intentlatch-gateway
+        {{- include "intentlatch.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets: {{ .Values.gateway.imagePullSecrets | toJson }}
+      terminationGracePeriodSeconds: 330
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      affinity:
+        {{- include "intentlatch.generalAffinity" . | nindent 8 }}
+        {{- if .Values.ollama.dedicatedNode }}
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: {app.kubernetes.io/name: ollama}
+              namespaces: [upstreams]
+              topologyKey: kubernetes.io/hostname
+        {{- end }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          nodeAffinityPolicy: Honor
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels: {app.kubernetes.io/name: intentlatch-gateway}
+      containers:
+        - name: gateway
+          image: "{{ .Values.gateway.image }}:{{ required "gateway.tag is required" .Values.gateway.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8080}]
+          securityContext:
+            {{- include "intentlatch.security" . | nindent 12 }}
+          envFrom:
+            - secretRef: {name: gateway-auth}
+          env:
+            - {name: INTENTLATCH_OLLAMA_URL, value: "http://ollama.upstreams.svc.cluster.local:11434"}
+            - {name: INTENTLATCH_MODEL_A, value: "qwen2.5:3b"}
+            - {name: INTENTLATCH_MODEL_B, value: "llama3.2:1b"}
+            - name: INTENTLATCH_UPSTREAM_TIMEOUT_SECONDS
+              value: {{ .Values.gateway.upstreamTimeoutSeconds | quote }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+          # A database outage must not cause a liveness restart storm.
+          livenessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 10
+            timeoutSeconds: 2
+          startupProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 5
+            failureThreshold: 36
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: intentlatch-gateway
+  namespace: intentlatch-system
+  labels: {app.kubernetes.io/name: intentlatch-gateway}
+spec:
+  selector: {app.kubernetes.io/name: intentlatch-gateway}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: intentlatch-gateway
+  namespace: intentlatch-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: intentlatch-gateway}
+{{- end }}

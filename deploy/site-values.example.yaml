@@ -1,0 +1,7 @@
+# Copy to site-values.yaml after choosing a real domain and creating WebUI users.
+webui:
+  enableSignup: false
+edge:
+  domain: example.com
+  acmeEmail: admin@example.com
+  issuer: letsencrypt-staging

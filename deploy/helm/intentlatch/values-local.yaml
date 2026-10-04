@@ -1,0 +1,31 @@
+profile: local
+storageClass: local-path
+gateway:
+  replicas: 1
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 384Mi}
+postgres:
+  storage: 1Gi
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+valkey:
+  storage: 512Mi
+  maxMemory: 64mb
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 250m, memory: 128Mi}
+ollama:
+  storage: 6Gi
+  dedicatedNode: false
+  resources:
+    requests: {cpu: "1", memory: 3Gi}
+    limits: {cpu: "2", memory: 4Gi}
+webui:
+  storage: 1Gi
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 1Gi}
+edge:
+  enabled: false

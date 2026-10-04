@@ -1,0 +1,221 @@
+{{- if .Values.edge.enabled }}
+{{- if eq .Values.profile "local" }}{{ fail "The local profile uses port-forwards, not a public edge" }}{{- end }}
+{{- $ipMode := eq (.Values.edge.mode | default "domain") "ip" }}
+{{- if not (has (.Values.edge.mode | default "domain") (list "domain" "ip")) }}{{ fail "edge.mode must be domain or ip" }}{{- end }}
+{{- $domain := .Values.edge.domain }}
+{{- $email := .Values.edge.acmeEmail }}
+{{- if not $ipMode }}
+{{- $domain = required "Set edge.domain before enabling edge" $domain }}
+{{- $email = required "Set edge.acmeEmail before enabling edge" $email }}
+{{- end }}
+{{- $tlsReady := or (not $ipMode) (not (empty .Values.edge.publicIP)) }}
+{{- if .Values.webui.enableSignup }}{{ fail "Bootstrap WebUI locally, then set webui.enableSignup=false before enabling edge" }}{{- end }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: intentlatch
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        replicas: {{ .Values.edge.replicas }}
+        container:
+          image: {{ .Values.edge.envoyImage }}
+          resources:
+            {{- toYaml .Values.edge.resources | nindent 12 }}
+        pod:
+          affinity:
+            {{- include "intentlatch.generalAffinity" . | nindent 12 }}
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: ScheduleAnyway
+              labelSelector:
+                matchLabels:
+                  gateway.envoyproxy.io/owning-gateway-name: intentlatch
+      envoyService:
+        type: LoadBalancer
+        externalTrafficPolicy: Local
+        annotations:
+          # TLS terminates in Envoy. The DO load balancer forwards TCP.
+          service.beta.kubernetes.io/do-loadbalancer-type: REGIONAL
+          service.beta.kubernetes.io/do-loadbalancer-protocol: tcp
+          service.beta.kubernetes.io/do-loadbalancer-size-unit: "1"
+          service.beta.kubernetes.io/do-loadbalancer-name: intentlatch-edge
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: intentlatch
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: intentlatch
+    namespace: envoy-gateway-system
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: intentlatch
+  namespace: envoy-gateway-system
+spec:
+  gatewayClassName: intentlatch
+  listeners:
+    # A hostless HTTP listener allows cert-manager's temporary HTTP-01 routes.
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces: {from: Same}
+    {{- if $tlsReady }}
+    {{- range $host := list "api" "chat" "grafana" }}
+    - name: {{ $host }}
+      {{- if not $ipMode }}
+      hostname: {{ printf "%s.%s" $host $domain | quote }}
+      {{- end }}
+      protocol: HTTPS
+      port: {{ if $ipMode }}{{ get (dict "chat" 443 "grafana" 8443 "api" 9443) $host }}{{ else }}443{{ end }}
+      tls:
+        mode: Terminate
+        certificateRefs: [{name: intentlatch-edge-tls}]
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels: {intentlatch.io/managed: "true"}
+    {{- end }}
+    {{- end }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: intentlatch
+  namespace: envoy-gateway-system
+spec:
+  targetRefs:
+    - {group: gateway.networking.k8s.io, kind: Gateway, name: intentlatch}
+  connection: {bufferLimit: 2Mi}
+  timeout:
+    http:
+      requestReceivedTimeout: 360s
+      streamIdleTimeout: 360s
+      idleTimeout: 360s
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: https-redirect
+  namespace: envoy-gateway-system
+spec:
+  parentRefs: [{name: intentlatch, sectionName: http}]
+  {{- if not $ipMode }}
+  hostnames: [{{ printf "api.%s" $domain | quote }}, {{ printf "chat.%s" $domain | quote }}, {{ printf "grafana.%s" $domain | quote }}]
+  {{- end }}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect: {scheme: https, port: 443, statusCode: 301}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api
+  namespace: intentlatch-system
+spec:
+  parentRefs: [{name: intentlatch, namespace: envoy-gateway-system, sectionName: api}]
+  {{- if not $ipMode }}
+  hostnames: [{{ printf "api.%s" $domain | quote }}]
+  {{- end }}
+  rules:
+    - matches:
+        - path: {type: PathPrefix, value: /v1}
+        - path: {type: PathPrefix, value: /api}
+        - path: {type: Exact, value: /authority}
+        - path: {type: Exact, value: /healthz}
+      timeouts: {request: 360s, backendRequest: 360s}
+      backendRefs: [{name: intentlatch-gateway, port: 8080}]
+---
+# These are finite JSON request bodies, even when responses use SSE/NDJSON.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: api-body-limit
+  namespace: intentlatch-system
+spec:
+  targetRefs:
+    - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: api}
+  requestBuffer: {limit: 1Mi}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: chat
+  namespace: agents
+spec:
+  parentRefs: [{name: intentlatch, namespace: envoy-gateway-system, sectionName: chat}]
+  {{- if not $ipMode }}
+  hostnames: [{{ printf "chat.%s" $domain | quote }}]
+  {{- end }}
+  rules:
+    - timeouts: {request: 360s, backendRequest: 360s}
+      backendRefs: [{name: open-webui, port: 8080}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: grafana
+  namespace: observability
+spec:
+  parentRefs: [{name: intentlatch, namespace: envoy-gateway-system, sectionName: grafana}]
+  {{- if not $ipMode }}
+  hostnames: [{{ printf "grafana.%s" $domain | quote }}]
+  {{- end }}
+  rules:
+    - timeouts: {request: 360s, backendRequest: 360s}
+      backendRefs: [{name: monitoring-grafana, port: 80}]
+{{- range $environment, $server := dict "staging" "https://acme-staging-v02.api.letsencrypt.org/directory" "production" "https://acme-v02.api.letsencrypt.org/directory" }}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-{{ $environment }}
+spec:
+  acme:
+    {{- if $email }}
+    email: {{ $email | quote }}
+    {{- end }}
+    {{- if $ipMode }}
+    profile: shortlived
+    {{- end }}
+    server: {{ $server }}
+    privateKeySecretRef: {name: intentlatch-acme-{{ $environment }}}
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - {name: intentlatch, namespace: envoy-gateway-system, kind: Gateway, sectionName: http}
+{{- end }}
+{{- if $tlsReady }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: intentlatch-edge
+  namespace: envoy-gateway-system
+spec:
+  secretName: intentlatch-edge-tls
+  issuerRef: {name: {{ .Values.edge.issuer }}, kind: ClusterIssuer}
+  {{- if $ipMode }}
+  ipAddresses: [{{ .Values.edge.publicIP | quote }}]
+  duration: 160h
+  renewBefore: 48h
+  {{- else }}
+  dnsNames: [{{ printf "api.%s" $domain | quote }}, {{ printf "chat.%s" $domain | quote }}, {{ printf "grafana.%s" $domain | quote }}]
+  {{- end }}
+  privateKey: {rotationPolicy: Always}
+{{- end }}
+{{- end }}

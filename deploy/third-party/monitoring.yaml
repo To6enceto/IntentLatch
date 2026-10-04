@@ -1,0 +1,117 @@
+fullnameOverride: monitoring
+defaultRules:
+  create: false
+kubeEtcd: {enabled: false}
+kubeControllerManager: {enabled: false}
+kubeScheduler: {enabled: false}
+kubeProxy: {enabled: false}
+windowsMonitoring: {enabled: false}
+prometheusOperator:
+  admissionWebhooks: {enabled: false}
+  # The webhook's certificate Secret is absent when admission is disabled.
+  tls: {enabled: false}
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 300m, memory: 128Mi}
+  prometheusConfigReloader:
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {cpu: 100m, memory: 64Mi}
+  affinity: &general
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - {key: intentlatch.io/role, operator: NotIn, values: [ollama]}
+prometheus:
+  prometheusSpec:
+    replicas: 1
+    retention: 2d
+    retentionSize: 4GB
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    resources:
+      requests: {cpu: 200m, memory: 768Mi}
+      limits: {cpu: "1", memory: 1536Mi}
+    affinity: *general
+    serviceMonitorSelectorNilUsesHelmValues: true
+    ruleSelectorNilUsesHelmValues: true
+    storageSpec:
+      volumeClaimTemplate:
+        metadata:
+          labels: {intentlatch.io/managed: "true"}
+        spec:
+          storageClassName: do-block-storage
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests: {storage: 5Gi}
+alertmanager:
+  enabled: true
+  config:
+    global: {resolve_timeout: 5m}
+    route: {receiver: "null", group_by: [alertname, namespace]}
+    receivers: [{name: "null"}]
+  alertmanagerSpec:
+    replicas: 1
+    retention: 48h
+    resources:
+      requests: {cpu: 25m, memory: 64Mi}
+      limits: {cpu: 100m, memory: 128Mi}
+    affinity: *general
+grafana:
+  fullnameOverride: monitoring-grafana
+  defaultDashboardsEnabled: false
+  admin:
+    existingSecret: grafana-auth
+    userKey: admin-user
+    passwordKey: admin-password
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+  affinity: *general
+  deploymentStrategy: {type: Recreate}
+  persistence:
+    enabled: true
+    type: pvc
+    storageClassName: do-block-storage
+    accessModes: [ReadWriteOnce]
+    size: 1Gi
+  initChownData: {enabled: false}
+  testFramework: {enabled: false}
+  grafana.ini:
+    auth.anonymous: {enabled: false}
+    auth.basic: {enabled: true}
+    users: {allow_sign_up: false}
+    analytics: {reporting_enabled: false, check_for_updates: false}
+  sidecar:
+    resources:
+      requests: {cpu: 20m, memory: 64Mi}
+      limits: {cpu: 100m, memory: 128Mi}
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: observability
+    datasources: {enabled: false}
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          uid: prometheus
+          type: prometheus
+          access: proxy
+          url: http://monitoring-prometheus.observability.svc.cluster.local:9090
+          isDefault: true
+          editable: false
+kube-state-metrics:
+  resources:
+    requests: {cpu: 30m, memory: 64Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+  affinity: *general
+prometheus-node-exporter:
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 64Mi}
+  tolerations:
+    - {key: intentlatch.io/role, operator: Equal, value: ollama, effect: NoSchedule}

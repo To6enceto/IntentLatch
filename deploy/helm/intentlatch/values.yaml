@@ -1,0 +1,94 @@
+profile: cloud
+storageClass: do-block-storage
+namespaces:
+  - intentlatch-system
+  - intentlatch-data
+  - agents
+  - upstreams
+  - observability
+
+gateway:
+  enabled: true
+  image: ghcr.io/antonstwork/intentlatch-gateway
+  tag: b1b0289e9412484816bb473e38eb73a3b4ccc7c7
+  imagePullSecrets: []
+  replicas: 2
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  upstreamTimeoutSeconds: 180
+  # Future settings are deliberately not injected into the Deployment.
+  future:
+    valkeyEnvironmentVariable: ""
+    controlAgentUrlEnvironmentVariable: ""
+    controlAgentModelEnvironmentVariable: ""
+    failureModeEnvironmentVariable: ""
+
+postgres:
+  enabled: true
+  image: postgres:17.10-bookworm
+  storage: 5Gi
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+valkey:
+  enabled: true
+  image: valkey/valkey:8.1.10
+  storage: 1Gi
+  maxMemory: 128mb
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+
+ollama:
+  enabled: true
+  image: ollama/ollama:0.35.1
+  storage: 10Gi
+  dedicatedNode: true
+  models: ["qwen2.5:3b", "llama3.2:1b"]
+  resources:
+    requests: {cpu: "2", memory: 4Gi}
+    # 6Gi would consume almost all 6.26Gi allocatable before system pods.
+    limits: {cpu: "3", memory: 4608Mi}
+  pull:
+    enabled: false
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {cpu: 250m, memory: 128Mi}
+
+webui:
+  enabled: true
+  image: ghcr.io/open-webui/open-webui:v0.11.4
+  storage: 2Gi
+  # Bootstrap the first admin through localhost, then turn this off before edge.
+  enableSignup: true
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "1", memory: 1536Mi}
+
+networkPolicies:
+  enabled: true
+
+monitoring:
+  # Enable after installing kube-prometheus-stack CRDs.
+  enabled: false
+  release: monitoring
+
+edge:
+  # domain uses DNS names; ip uses ports 443 (Chat), 8443 (Grafana), 9443 (API).
+  enabled: false
+  mode: domain
+  # Empty in IP mode during HTTP-01/load-balancer bootstrap only.
+  publicIP: ""
+  domain: ""
+  acmeEmail: ""
+  issuer: letsencrypt-staging
+  envoyImage: docker.io/envoyproxy/envoy:distroless-v1.39.1@sha256:eb2c01c13125d1629637cb4e4cce7207009fb7cc2c8027f9742758549d15b6f4
+  replicas: 2
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+
+# Filled only with kubeseal ciphertext. See values-secrets.example.yaml.
+sealedSecrets: {}
