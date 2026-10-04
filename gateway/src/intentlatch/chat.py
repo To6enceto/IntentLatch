@@ -90,6 +90,20 @@ def prompt_texts(messages: list[dict[str, Any]]) -> list[str]:
     return [piece.text for piece in prompt_pieces(messages)]
 
 
+def tool_pieces(tools: Any) -> list[Piece]:
+    """One piece per forwarded tool definition, as JSON; the model reads it, so policies check it."""
+    if tools is None:
+        return []
+    entries = tools if isinstance(tools, list) else [tools]
+    # Never rewritten, like tool-call arguments: an edit match left here blocks at the re-check.
+    return [Piece(json.dumps(entry, ensure_ascii=False), False) for entry in entries]
+
+
+def request_pieces(data: dict[str, Any]) -> list[Piece]:
+    """What a chat request's prompt policies check: every message, then every tool definition."""
+    return prompt_pieces(data["messages"]) + tool_pieces(data.get("tools"))
+
+
 def rewrite_content(content: Any, texts: Iterator[str]) -> Any:
     if isinstance(content, str):
         return next(texts)

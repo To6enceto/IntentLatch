@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import decision_log, limits, pipeline, upstream
 from ..auth import require_identity
-from ..chat import ChatRequest, Piece, allowlisted, apply_rewrites, message_pieces, prompt_pieces, rewrite_message
+from ..chat import ChatRequest, Piece, allowlisted, apply_rewrites, message_pieces, request_pieces, rewrite_message
 from ..errors import GatewayError
 
 router = APIRouter(dependencies=[Depends(require_identity)])
@@ -49,9 +49,7 @@ async def chat_completions(body: OpenAIChatRequest, request: Request) -> Respons
     tag = request.app.state.llms.tag_for(body.model)
     trace = decision_log.start(request, body.model)
     data = body.model_dump(exclude_unset=True)
-    snapshot, decision = await pipeline.enforce_prompt_policies(
-        request, body.model, prompt_pieces(data["messages"])
-    )
+    snapshot, decision = await pipeline.enforce_prompt_policies(request, body.model, request_pieces(data))
     if decision.rewrites is not None:
         data["messages"] = apply_rewrites(data["messages"], decision.rewrites)
     payload = allowlisted(data, FORWARDED_FIELDS) | {"model": tag, "stream": False}

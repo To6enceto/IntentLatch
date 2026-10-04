@@ -315,8 +315,10 @@ model's answer, or on both:
 
 - **The prompt** is every message in a chat request, whatever its role (`system`,
   `user`, `assistant` or `tool`), because the client controls the whole history.
-  Each message's text and its tool-call arguments are checked. `/check` treats
-  `prompt` as one user message.
+  Each message's text and its tool-call arguments are checked, and so is every
+  tool definition in `tools`, as JSON, because the model reads those too.
+  `response_format` and `format` are not checked. `/check` treats `prompt` as
+  one user message.
 - **The answer** is the model's text and tool-call arguments. It is checked
   before anything reaches the caller; streamed answers are buffered first.
 
@@ -411,8 +413,8 @@ status says:
   the rewritten answer (as JSON or replayed as a stream). Just before that, the
   matched `edit` regex policies run again on the rewrite; if one still matches,
   the request is blocked under that policy's code.
-- **Tool calls.** Tool-call arguments are never rewritten, so an `edit` match
-  there blocks through that re-check.
+- **Tools.** Tool-call arguments and tool definitions are never rewritten, so an
+  `edit` match there blocks through that re-check.
 
 A timeout, an unreachable agent, an unparseable verdict or a missing rewrite is a
 control-agent failure. With `INTENTLATCH_ENVIRONMENT=production` (the default) the
@@ -435,7 +437,9 @@ curl -s localhost:8080/check -H "Authorization: Bearer $TOKEN" \
 | `AI-NO-COMMITMENTS` | no binding price, discount or refund promises | edit | response |
 
 With these seeds enabled every chat request calls the agent, which takes roughly
-5 to 15 s per call on CPU. Disable a seed to skip it.
+5 to 15 s per call on CPU. Disable a seed to skip it. Tool definitions go to the
+agent too, so a request with many large tools makes its call slower and can
+overflow the model's context window (4096 tokens in the cluster).
 
 ## Decision log
 
