@@ -335,7 +335,7 @@ counted when it ends, from the same trace the decision log writes.
 | `intentlatch_control_agent_verdicts_total` | counter | direction, status |
 | `intentlatch_control_agent_errors_total` | counter | reason (timeout, unreachable, unparseable, missing_rewrite) |
 | `intentlatch_rewrite_rejections_total` | counter | policy_code |
-| `intentlatch_test_cases_total` | counter | result |
+| `intentlatch_test_cases_total` | counter | result (passed, failed) |
 | `intentlatch_policies_active` | gauge | kind (authority, limit, regex, ai) |
 
 `intentlatch_policy_enforcements_total` counts the policies responsible for each
@@ -372,3 +372,84 @@ curl -s localhost:8080/check -H "Authorization: Bearer $TOKEN" \
 
 An authority or limit block stops the pipeline, so the first answer has no regex
 results. `/check` reports limit policies but never counts tokens.
+
+## Test cases
+
+A test case states what must happen to a prompt: the prompt, the model, the
+employee it runs as, the expected outcome (`ALLOW`, `EDIT` or `BLOCK`),
+optionally the policy code that must fire, and for an `EDIT` case the strings the
+rewritten prompt must not contain.
+
+The gateway seeds a test team, `intentlatch-tests`, authorized for `corporate-a`
+only, with one employee, `test-runner`, whose token is never issued. The
+predefined cases run as that employee. Missing cases are inserted at startup, so
+edits to a predefined case survive restarts.
+
+| Predefined cases | Expected |
+|---|---|
+| `TC-BENIGN-QUESTION`, `TC-BENIGN-TASK` | `ALLOW` |
+| `TC-AUTH-MODEL` (asks for `corporate-b`) | `BLOCK` by `AUTH-MODEL` |
+| `TC-RGX-CLOUD-KEY`, `TC-RGX-CLOUD-KEY-HIDDEN` (zero-width split), `TC-RGX-CLOUD-KEY-BASE64` | `BLOCK` by `RGX-CLOUD-KEY` |
+| `TC-RGX-GIT-TOKEN`, `TC-RGX-PRIVATE-KEY` | `BLOCK` by that policy |
+| `TC-RGX-EMAIL`, `TC-RGX-PHONE`, `TC-RGX-IBAN`, `TC-RGX-PESEL`, `TC-RGX-CARD` | `EDIT` by that policy, with the value gone |
+| `TC-AI-NO-JAILBREAK`, `TC-AI-NO-CREDENTIALS` | `BLOCK` by that policy |
+
+Runs use check mode. Each case goes through `POST /check` as its employee, with a
+token the gateway signs for 60 seconds and never shows, so revoking or reissuing
+the employee applies to its cases too. Nothing is forwarded to a corporate LLM
+and nothing reaches the decision log. A case passes when the outcome matches, the
+expected policy is one of those responsible for it, no listed string is left in
+the rewrite (ignoring case), and the control agent did not fail. Cases that reach
+the control agent take seconds each on CPU and fail while it is unreachable.
+Limit policies and the response-only `AI-NO-COMMITMENTS` and `RGX-EXFIL-IMAGE`
+have no predefined case, because check mode counts no tokens and sees no answer.
+
+```bash
+curl -s localhost:8080/admin/test-cases -H "$ADMIN" -H 'content-type: application/json' \
+  -d '{"code": "TC-IBAN-DE", "name": "A German IBAN is removed", "prompt": "Pay DE89 3704 0044 0532 0130 00 today",
+       "model": "corporate-a", "expected": "EDIT", "expected_policy_code": "RGX-IBAN",
+       "must_not_contain": ["DE89 3704 0044 0532 0130 00"]}'
+# -> 201 {"test_case": {"code": "TC-IBAN-DE", ..., "run_as_employee_id": "7e57ca5e-...", "predefined": false, ...}}
+
+curl -s -X PATCH localhost:8080/admin/test-cases/TC-IBAN-DE -H "$ADMIN" \
+  -H 'content-type: application/json' -d '{"name": "IBAN, German format"}'
+curl -s localhost:8080/admin/test-cases -H "$ADMIN"
+
+curl -s localhost:8080/admin/test-runs -H "$ADMIN" -H 'content-type: application/json' \
+  -d '{"cases": ["TC-AUTH-MODEL"]}'
+# -> 201 {"test_run": {"id": "<run-id>", "mode": "check", "status": "passed",
+#      "totals": {"total": 1, "passed": 1, "failed": 0}, "results": [{"case_code": "TC-AUTH-MODEL",
+#      "expected": "BLOCK", "actual": "BLOCK", "fired_policy_codes": ["AUTH-MODEL"], "passed": true, "failure": null, ...}]}}
+curl -s localhost:8080/admin/test-runs -H "$ADMIN"               # the newest 50 runs
+curl -s localhost:8080/admin/test-runs/<run-id> -H "$ADMIN"      # one run with its results
+```
+
+`run_as_employee_id` defaults to the test employee. `expected_policy_code` is not
+allowed on `ALLOW` cases and `must_not_contain` only on `EDIT` cases. Codes cannot
+change and cases cannot be deleted. A run without `cases` runs every case in code
+order. It answers when its last case ends, stores each result as soon as its case
+finishes, and passes only when at least one case ran and every case passed. A
+case that gets no decision, for example because its employee was revoked, has
+`actual` `ERROR`. Each result counts in `intentlatch_test_cases_total`.
+
+### `intentlatch test run`
+
+The same run from a shell, for people and CI. It calls the running gateway with
+the admin key from `INTENTLATCH_ADMIN_API_KEY` and exits 0 when every case
+passed, 1 when any failed, and 2 when the run could not start (no key, gateway
+unreachable, an error answer).
+
+```bash
+INTENTLATCH_ADMIN_API_KEY=$(grep '^INTENTLATCH_ADMIN_API_KEY=' gateway/.env | cut -d= -f2-) \
+  .venv/bin/intentlatch test run          # options: --case TC-AUTH-MODEL (repeatable), --url http://host:8080
+# Test run <run-id>: check mode, policy version 4
+# PASS  TC-AUTH-MODEL  BLOCK -> BLOCK  fired AUTH-MODEL  2 ms
+# ...
+# 15 passed, 0 failed, 15 total: passed
+
+kubectl exec -n intentlatch-system deploy/intentlatch-gateway -- intentlatch test run
+```
+
+The command ships with the gateway package, so an environment created before it
+needs `.venv/bin/pip install -e "./gateway[test]"` again. It defaults to
+`http://127.0.0.1:8080`, which is the gateway inside its container too.

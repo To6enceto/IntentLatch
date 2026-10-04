@@ -17,6 +17,9 @@ dependencies = [
     "prometheus-client>=0.20",
 ]
 
+[project.scripts]
+intentlatch = "intentlatch.cli:run"
+
 [project.optional-dependencies]
 test = ["pytest>=8"]
 

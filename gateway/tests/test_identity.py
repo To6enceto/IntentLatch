@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
@@ -63,6 +63,21 @@ def test_token_round_trip_carries_claims():
         "jti": str(TOKEN_ID),
         "iat": int(ISSUED_AT.timestamp()),
     }
+
+
+def test_an_expiry_adds_exp_and_is_enforced():
+    now = datetime.now(UTC)
+    live = issue_token(
+        employee_id=EMPLOYEE_ID, team="payments", models=["corporate-a"], token_id=TOKEN_ID,
+        issued_at=now, key=KEY, expires_at=now + timedelta(seconds=60),
+    )
+    assert verify_token(live, KEY) == TokenClaims(employee_id=EMPLOYEE_ID, token_id=TOKEN_ID)
+    assert jwt.decode(live, KEY, algorithms=["HS256"])["exp"] == int((now + timedelta(seconds=60)).timestamp())
+    expired = issue_token(
+        employee_id=EMPLOYEE_ID, team="payments", models=["corporate-a"], token_id=TOKEN_ID,
+        issued_at=now - timedelta(seconds=120), key=KEY, expires_at=now - timedelta(seconds=60),
+    )
+    assert_invalid(expired)
 
 
 def test_tampered_payload_is_rejected():

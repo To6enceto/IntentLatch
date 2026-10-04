@@ -85,6 +85,8 @@ Run from the repository root unless noted.
 - Console typecheck: `npm --prefix console run typecheck`
 - Console build: `npm --prefix console run build`
 - Lint: none configured.
-- Policy test cases: `intentlatch test run` is planned with the test runner and
-  is not available yet. This is a product feature, separate from the project's
-  own unit tests.
+- Policy test cases (needs a running gateway):
+  `INTENTLATCH_ADMIN_API_KEY=<admin key> .venv/bin/intentlatch test run`, which
+  exits non-zero on any failure (re-run the Python environment install to get
+  the command). This is a product feature, separate from the project's own unit
+  tests.

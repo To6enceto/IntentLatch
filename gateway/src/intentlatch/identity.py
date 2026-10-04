@@ -51,6 +51,7 @@ def issue_token(
     token_id: uuid.UUID,
     issued_at: datetime,
     key: str,
+    expires_at: datetime | None = None,
 ) -> str:
     payload = {
         "sub": str(employee_id),
@@ -59,6 +60,9 @@ def issue_token(
         "jti": str(token_id),
         "iat": int(issued_at.timestamp()),
     }
+    # Employee tokens never expire; only the test runner's minted tokens carry exp, which decode enforces.
+    if expires_at is not None:
+        payload["exp"] = int(expires_at.timestamp())
     return jwt.encode(payload, key, algorithm=ALGORITHM)
 
 
