@@ -121,7 +121,8 @@ async def test_judge_posts_one_structured_chat_request():
         seen.append(request)
         return answer(verdict())
 
-    assert (await run(handler, ["one", "two"])).status == "pass"
+    parsed, seconds = await run(handler, ["one", "two"])
+    assert (parsed.status, seconds) == ("pass", 0.0)
     [request] = seen
     payload = json.loads(request.content)
     assert (request.method, request.url.path) == ("POST", "/api/chat")
@@ -129,6 +130,22 @@ async def test_judge_posts_one_structured_chat_request():
     assert payload["format"] == VERDICT_FORMAT
     assert [message["role"] for message in payload["messages"]] == ["system", "user"]
     assert json.loads(payload["messages"][1]["content"]) == body(["one", "two"])
+
+
+@pytest.mark.anyio
+async def test_judge_reports_the_agents_eval_durations_in_seconds():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "message": {"role": "assistant", "content": verdict()},
+                "prompt_eval_duration": 1_500_000_000,
+                "eval_duration": 2_000_000_000,
+            },
+        )
+
+    _, seconds = await run(handler)
+    assert seconds == 3.5
 
 
 def raise_timeout(request: httpx.Request) -> httpx.Response:

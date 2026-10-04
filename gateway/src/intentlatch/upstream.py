@@ -41,6 +41,18 @@ async def request_json(client: httpx.AsyncClient, method: str, path: str, **kwar
     return body
 
 
+def eval_seconds(reply: Any) -> float:
+    """Ollama's own model time for a native chat reply, from its nanosecond durations."""
+    if not isinstance(reply, dict):
+        return 0.0
+    total = 0
+    for key in ("prompt_eval_duration", "eval_duration"):
+        value = reply.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            total += value
+    return total / 1e9
+
+
 async def ping(client: httpx.AsyncClient) -> bool:
     try:
         response = await client.get("/api/version", timeout=PING_TIMEOUT_SECONDS)

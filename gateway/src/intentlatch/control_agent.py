@@ -7,6 +7,7 @@ from pydantic import BaseModel, ValidationError
 
 from .identity import Identity
 from .policies import Policy
+from .upstream import eval_seconds
 
 REASONING_MAX = 300
 VALUES_MAX = 10
@@ -113,7 +114,8 @@ def parse_verdict(content: Any, piece_count: int) -> Verdict:
     return verdict.model_copy(update={"violations": violations})
 
 
-async def judge(client: httpx.AsyncClient, model: str, body: dict[str, Any]) -> Verdict:
+async def judge(client: httpx.AsyncClient, model: str, body: dict[str, Any]) -> tuple[Verdict, float]:
+    """The verdict and the agent's model seconds; failures raise AgentFailure."""
     payload = {
         "model": model,
         "stream": False,
@@ -138,4 +140,4 @@ async def judge(client: httpx.AsyncClient, model: str, body: dict[str, Any]) -> 
         raise AgentFailure("unparseable") from exc
     message = reply.get("message") if isinstance(reply, dict) else None
     content = message.get("content") if isinstance(message, dict) else None
-    return parse_verdict(content, len(body["texts"]))
+    return parse_verdict(content, len(body["texts"])), eval_seconds(reply)

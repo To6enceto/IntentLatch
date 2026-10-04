@@ -288,6 +288,31 @@ curl -s localhost:8080/check -H "Authorization: Bearer $TOKEN" \
 With these seeds enabled every chat request calls the agent, which takes roughly
 5 to 15 s per call on CPU. Disable a seed to skip it.
 
+## Decision log
+
+Every chat request that reaches a prompt decision leaves records in the
+append-only `decision_records` table: one for the prompt and, when the answer was
+checked, one for the response. A record holds the outcome, the control agent's
+status, every policy's result and reasoning, the source text and any rewrite, the
+employee, team and model, tokens, compute seconds, stage latencies and the policy
+version. Tokens, upstream time and auth time sit on the prompt record, so totals
+never count a request twice. `/check` writes nothing.
+
+Every regex match is masked as `[CODE]` before anything is stored, reasoning
+included. A value that only shows up once decoded (Base64, URL encoding, invisible
+characters) masks its whole piece as `[masked: CODE]`, so raw sensitive values
+never persist.
+
+Records are hash-chained: each `hash` is the SHA-256 of the previous record's
+`hash` followed by the record's canonical JSON (sorted keys, no spaces), starting
+from 64 zeros. Triggers refuse UPDATE, DELETE and TRUNCATE. If the records cannot
+be written, the request answers 503 `database_unavailable` instead of its answer.
+
+```bash
+docker exec intentlatch-pg psql -U intentlatch -c \
+  "SELECT seq, direction, outcome, control_agent_status, source_masked FROM decision_records ORDER BY seq DESC LIMIT 5"
+```
+
 ## Check a prompt
 
 `POST /check` runs a prompt through the policy pipeline as the token's employee

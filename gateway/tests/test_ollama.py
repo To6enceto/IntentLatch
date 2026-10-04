@@ -1,6 +1,6 @@
 import pytest
 
-from intentlatch.routes.ollama import apply_reply_rewrites, reply_texts, reply_usage
+from intentlatch.routes.ollama import apply_reply_rewrites, reply_counts, reply_texts
 
 
 def test_reply_texts_read_the_message():
@@ -38,19 +38,19 @@ def test_reply_rewrite_replaces_the_answer_and_keeps_tool_calls_and_counts():
     assert apply_reply_rewrites({"done": True}, []) == {"done": True}
 
 
-def test_reply_usage_adds_prompt_and_answer_counts():
+def test_reply_counts_read_prompt_and_answer_tokens():
     reply = {"model": "corporate-a", "done": True, "prompt_eval_count": 26, "eval_count": 298}
-    assert reply_usage(reply) == 324
+    assert reply_counts(reply) == (26, 298)
 
 
 @pytest.mark.parametrize(
     ("reply", "expected"),
     [
-        ({}, 0),
-        ({"eval_count": 298}, 298),
-        ({"prompt_eval_count": 26, "eval_count": None}, 26),
-        ({"prompt_eval_count": "26", "eval_count": 2.5}, 0),
+        ({}, (0, 0)),
+        ({"eval_count": 298}, (0, 298)),
+        ({"prompt_eval_count": 26, "eval_count": None}, (26, 0)),
+        ({"prompt_eval_count": "26", "eval_count": 2.5}, (0, 0)),
     ],
 )
-def test_reply_usage_counts_only_valid_fields(reply, expected):
-    assert reply_usage(reply) == expected
+def test_reply_counts_only_valid_fields(reply, expected):
+    assert reply_counts(reply) == expected

@@ -15,6 +15,7 @@ from .limits import WindowUsage
 from .normalize import normalized_views
 from .policies import Action, Kind, Policy, PolicySnapshot
 from .teams import iso
+from .trace import Stage
 
 log = logging.getLogger("intentlatch")
 
@@ -407,11 +408,14 @@ async def judged(
     results: list[PolicyResult],
     pieces: list[Piece],
     direction: Direction,
+    non_ai_ms: float,
 ) -> Decision:
     production = request.app.state.settings.environment == "production"
-    if not needs_agent(snapshot, results, direction):
-        return finish(snapshot, results, pieces, direction, production=production)
     texts = [piece.text for piece in pieces]
+    if not needs_agent(snapshot, results, direction):
+        decision = finish(snapshot, results, pieces, direction, production=production)
+        record_stage(request, direction, Stage(decision, texts, non_ai_ms))
+        return decision
     body = control_agent.agent_request(
         direction,
         request.state.identity,
@@ -420,9 +424,9 @@ async def judged(
         texts,
     )
     started = time.perf_counter()
-    verdict, failure = None, None
+    verdict, failure, seconds = None, None, 0.0
     try:
-        verdict = await control_agent.judge(
+        verdict, seconds = await control_agent.judge(
             request.app.state.control_agent, request.app.state.settings.control_agent_model, body
         )
     except AgentFailure as exc:
@@ -433,19 +437,33 @@ async def judged(
             direction,
             failure,
         )
-    return finish(snapshot, results, pieces, direction, verdict, failure, elapsed_ms(started), production)
+    agent_ms = elapsed_ms(started)
+    decision = finish(snapshot, results, pieces, direction, verdict, failure, agent_ms, production)
+    record_stage(request, direction, Stage(decision, texts, non_ai_ms, agent_ms, seconds))
+    return decision
+
+
+def record_stage(request: Request, direction: Direction, stage: Stage) -> None:
+    # Only chat requests carry a trace; /check runs the same checks and logs nothing.
+    trace = getattr(request.state, "trace", None)
+    if trace is not None:
+        setattr(trace, direction, stage)
 
 
 async def prompt_decision(
     request: Request, model: str, pieces: list[Piece]
 ) -> tuple[PolicySnapshot, Decision]:
+    started = time.perf_counter()
     pool = request.app.state.pool
     identity = request.state.identity
     snapshot = await policies.load_snapshot(pool)
+    trace = getattr(request.state, "trace", None)
+    if trace is not None:
+        trace.snapshot = snapshot
     windows = {policy.params["window_seconds"] for policy in team_limits(snapshot, identity)}
     usage = await limits.load_usage(pool, identity.team_id, windows)
     results = first_stages(snapshot, identity, model, [piece.text for piece in pieces], usage)
-    return snapshot, await judged(request, snapshot, results, pieces, "prompt")
+    return snapshot, await judged(request, snapshot, results, pieces, "prompt", elapsed_ms(started))
 
 
 async def decide_prompt(request: Request, model: str, pieces: list[Piece]) -> Decision:
@@ -465,7 +483,8 @@ async def enforce_prompt_policies(
 async def enforce_response_policies(
     request: Request, snapshot: PolicySnapshot, pieces: list[Piece]
 ) -> Decision:
+    started = time.perf_counter()
     results = regex_results(snapshot, [piece.text for piece in pieces], "response")
-    decision = await judged(request, snapshot, results, pieces, "response")
+    decision = await judged(request, snapshot, results, pieces, "response", elapsed_ms(started))
     enforce(request, decision, "response")
     return decision

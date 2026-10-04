@@ -1,4 +1,5 @@
 import hmac
+import time
 
 from fastapi import Request
 
@@ -35,6 +36,7 @@ async def require_admin(request: Request) -> None:
 
 
 async def require_identity(request: Request) -> Identity:
+    started = time.perf_counter()
     key = request.app.state.settings.token_signing_key.get_secret_value()
     try:
         claims = verify_token(bearer_token(request.headers.get("authorization")), key)
@@ -43,4 +45,5 @@ async def require_identity(request: Request) -> Identity:
     except TokenError as exc:
         raise GatewayError(401, exc.code, TOKEN_MESSAGES[exc.code], headers=challenge(exc.code)) from exc
     request.state.identity = identity
+    request.state.auth_ms = round((time.perf_counter() - started) * 1000, 3)
     return identity

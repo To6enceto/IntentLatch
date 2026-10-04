@@ -7,8 +7,8 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Response
 
-from . import db, policies
-from .errors import error_response, install_error_handlers
+from . import db, decision_log, policies
+from .errors import GatewayError, error_response, install_error_handlers
 from .llms import CorporateLlms
 from .routes import admin, authority, check, health, ollama, openai
 from .settings import load_settings
@@ -26,6 +26,24 @@ def configure_logging() -> None:
     log.addHandler(handler)
     log.setLevel(logging.INFO)
     log.propagate = False
+
+
+async def log_decisions(request: Request, response: Response, started: float) -> Response:
+    # The trace is complete here: the endpoint has built its response, buffered streams included.
+    trace = getattr(request.state, "trace", None)
+    if trace is None or trace.prompt is None:
+        return response
+    total_ms = round((time.perf_counter() - started) * 1000, 3)
+    try:
+        await decision_log.write(request.app.state.pool, trace, total_ms)
+    except GatewayError as exc:
+        # A decision that cannot be recorded does not go out.
+        log.error("decision log write failed request_id=%s code=%s", trace.request_id, exc.code)
+        return error_response(exc.status_code, exc.code, exc.message)
+    except Exception:
+        log.exception("decision log write failed request_id=%s", trace.request_id)
+        return error_response(500, "internal_error", "Internal error.")
+    return response
 
 
 def create_app(
@@ -78,6 +96,7 @@ def create_app(
         except Exception:
             log.exception("unhandled error request_id=%s", request_id)
             response = error_response(500, "internal_error", "Internal error.")
+        response = await log_decisions(request, response, started)
         response.headers["X-Request-ID"] = request_id
         log.info(
             "%s %s %d %.1fms request_id=%s",

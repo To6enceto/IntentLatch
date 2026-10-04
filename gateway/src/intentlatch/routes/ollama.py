@@ -1,10 +1,11 @@
 import json
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .. import limits, pipeline, upstream
+from .. import decision_log, limits, pipeline, upstream
 from ..auth import require_identity
 from ..chat import ChatRequest, Piece, allowlisted, apply_rewrites, message_pieces, prompt_pieces, rewrite_message
 
@@ -45,6 +46,7 @@ async def list_tags(request: Request) -> dict[str, Any]:
 @router.post("/api/chat")
 async def chat(body: OllamaChatRequest, request: Request) -> Response:
     tag = request.app.state.llms.tag_for(body.model)
+    trace = decision_log.start(request, body.model)
     data = body.model_dump(exclude_unset=True)
     snapshot, decision = await pipeline.enforce_prompt_policies(
         request, body.model, prompt_pieces(data["messages"])
@@ -58,9 +60,15 @@ async def chat(body: OllamaChatRequest, request: Request) -> Response:
         if kept:
             payload["options"] = kept
     payload |= {"model": tag, "stream": False}
+    started = time.perf_counter()
     reply = await upstream.request_json(request.app.state.ollama, "POST", "/api/chat", json=payload)
+    trace.upstream_ms = pipeline.elapsed_ms(started)
+    trace.upstream_seconds = upstream.eval_seconds(reply)
+    trace.tokens_in, trace.tokens_out = reply_counts(reply)
     # Counted before response policies run: a blocked answer still spent its tokens.
-    await limits.record_usage(request.app.state.pool, request.state.identity.team_id, reply_usage(reply))
+    await limits.record_usage(
+        request.app.state.pool, request.state.identity.team_id, trace.tokens_in + trace.tokens_out
+    )
     answer = await pipeline.enforce_response_policies(request, snapshot, reply_pieces(reply))
     if answer.rewrites is not None:
         reply = apply_reply_rewrites(reply, answer.rewrites)
@@ -84,8 +92,9 @@ def apply_reply_rewrites(reply: dict[str, Any], texts: list[str]) -> dict[str, A
     return reply | {"message": rewrite_message(reply["message"], iter(texts))}
 
 
-def reply_usage(reply: dict[str, Any]) -> int:
-    return limits.reported(reply.get("prompt_eval_count")) + limits.reported(reply.get("eval_count"))
+def reply_counts(reply: dict[str, Any]) -> tuple[int, int]:
+    """The reported prompt and answer tokens."""
+    return limits.reported(reply.get("prompt_eval_count")), limits.reported(reply.get("eval_count"))
 
 
 def replay_as_ndjson(reply: dict[str, Any]) -> list[str]:
